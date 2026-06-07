@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qecsim"
+version = "0.1.0"
+description = "QEC control/decoding simulator package scaffold"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+stim = ["stim"]
+pymatching = ["pymatching"]
+
+[tool.setuptools]
+package-dir = {"" = "qecsim"}
+
+[tool.setuptools.packages.find]
+where = ["qecsim"]
+include = ["qecsim*"]
