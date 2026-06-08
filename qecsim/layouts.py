@@ -10,7 +10,7 @@ if TYPE_CHECKING:                      # hints only; lazy annotations mean no ru
 # This module defines the qpu layout and code assignment so single 
 # machine can be heterogeneous. 
 # ====================================================================
-
+# TODO: This is for testing need to double check
 class UniformLayout:
     """The whole QPU uses ONE code -- one zone, every patch the same. This reproduces the
     original single-code behavior exactly: spatial_nodes_for(op) is the code's aggregate
@@ -39,7 +39,7 @@ class UniformLayout:
     def codes(self) -> list:
         return [self.code]
     
-
+# TODO: This is for testing need to double check
 class ZonedLayout:
     """A HETEROGENEOUS QPU: patches are assigned to codes by zone. Built from an explicit
     {patch_id: CodeModel} assignment plus a default code for any unlisted patch.

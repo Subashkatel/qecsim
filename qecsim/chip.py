@@ -105,7 +105,7 @@ class Chip:
  
     def _maybe_begin(self, op: Operation) -> None:
         """Begin the op's physical rounds once BOTH hold: the magic state is in hand, and (for a
-        gated gate) the prior decode outcome has returned. These two waits run CONCURRENTLY, so a
+        blocked gate) the prior decode outcome has returned. These two waits run CONCURRENTLY, so a
         conditional T gate pays max(reaction, supply) -- not their sum, the old serial behavior."""
         if op.id in self.started or op.id not in self.state_ready:
             return
@@ -191,9 +191,9 @@ class Chip:
                              lambda oid=op_id, pt=patch, kk=k: self._emit_idle_round(oid, pt, kk + 1),
                              label=f"idle-tick({self.ops[op_id].name},{k + 1})")
  
-    # ---- decode result came back (only relevant for gated T gates) ----------
+    # ---- decode result came back (only relevant for blocked T gates) ----------
     def on_decision(self, decision: Decision) -> None:
-        """A correction came back: release the gated gate. It begins immediately if its magic
+        """A correction came back: release the blocked gate. It begins immediately if its magic
         state has already arrived (fetched in parallel during the reaction); otherwise it begins
         when the state lands. _maybe_begin enforces the AND of the two conditions."""
         self.gate_released.add(decision.gadget_id)
