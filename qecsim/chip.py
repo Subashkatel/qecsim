@@ -171,7 +171,7 @@ class Chip:
                                  label=f"idle-tick({op.name},1)")
  
     def _has_waiting_gated_successor(self, op_id: int) -> bool:
-        """True while some successor on this op's patch is gated and not yet released/started."""
+        """True while some successor on this op's patch is blocked and not yet released/started."""
         return any(
             (op_id in s.predecessors) and (s.gated_by is not None)
             and (s.id not in self.gate_released) and (s.id not in self.started)
