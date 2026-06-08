@@ -23,7 +23,7 @@ class SyndromePayload:
     coords: tuple = () # (x, y, t) space-time tag that keeps data seperated
     code: Optional[str] = None # code name for this syndrome (e.g. "surface", "color", "heavyhex", etc.)
 
-dataclass
+@dataclass
 class MagicState:
     """ A distilled resource state a factory can hand to it consumers 
     (e.g. the orchestrator) to enable non-Clifford operations."""
