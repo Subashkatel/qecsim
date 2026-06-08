@@ -76,7 +76,7 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     if code is None:
         code = layout.codes()[0] if layout is not None else SurfaceCodeModel(d=d)
 
-    # Every collaborator is a swap point: pass your own, or get the config-built default.
+    # Every part is a swap point: pass your own, or get the config-built default.
     if device is None:        device = TimingOnlyDevice()
     if decoder is None:       decoder = cfg.make_decoder(code)
     if controller is None:    controller = cfg.make_controller(engine)
