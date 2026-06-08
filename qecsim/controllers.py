@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-from config import us
-from engine import Engine
-from message import SyndromePayload, Decision
+from .config import us
+from .engine import Engine
+from .message import SyndromePayload, Decision
 # ================================================================================
 # CONTROLLER
 # The controller the paper's "modular controller" (arXiv:2511.10633 Sec III).

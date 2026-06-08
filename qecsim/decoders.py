@@ -1,6 +1,6 @@
 from __future__ import annotations
-from config import us
-from message import DecodeJob, DecodeResult
+from .config import us
+from .message import DecodeJob, DecodeResult
 # ==================================================================================
 # DECODERS
 # The decoder implementations which is treated as a black box with two methods

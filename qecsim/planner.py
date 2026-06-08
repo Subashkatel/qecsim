@@ -2,10 +2,10 @@ from __future__ import annotations
  
 from typing import TYPE_CHECKING
  
-from message import Operation, Window, WindowPlan
+from .message import Operation, Window, WindowPlan
  
 if TYPE_CHECKING:                      
-    from protocols import DecodingScheme, LayoutModel
+    from .protocols import DecodingScheme, LayoutModel
 
 #==================================================================================================
 # PLANNER

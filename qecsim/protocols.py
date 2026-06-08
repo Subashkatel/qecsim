@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
-from qecsim.message import (Operation, SyndromePayload, DecodeJob, Window, WindowPlan,
+from .message import (Operation, SyndromePayload, DecodeJob, Window, WindowPlan,
                       DecodeResult, Decision)
 #=========================================================================
 # PROTOCOLS 
@@ -73,7 +73,7 @@ class ExecutionPlanner(Protocol):
     def plan(self, ops: list[Operation]) -> WindowPlan: ...
 
 @runtime_checkable
-class RoundPolicy(Protocol):
+class RoundsPolicy(Protocol):
     """ Thiis is responsible for deciding how many qec rounds an operation runs for
     changable so that we can test steady rounds or derived them pre code or compute 
     them form form other things depending on the operation and the code."""

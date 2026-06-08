@@ -1,5 +1,6 @@
-# from __future__ import annotations
-from message import DecodeJob
+from __future__ import annotations
+
+from .message import DecodeJob
 # ===============================================================================
 # SCHEDULERS
 # A scheduler is the decode cluster queue ordering policy.

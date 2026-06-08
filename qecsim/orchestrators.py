@@ -3,12 +3,11 @@ from __future__ import annotations
 from collections import deque
 from typing import Callable, Optional, TYPE_CHECKING
  
-from engine import Engine
-from message import Operation, DecodeResult, Decision, WindowPlan
-from qecsim import engine
+from .engine import Engine
+from .message import Operation, DecodeResult, Decision, WindowPlan
  
 if TYPE_CHECKING:                      # type-only; the controller is wired in at runtime via connect()
-    from protocols import Controller
+    from .protocols import Controller
 
 #TODO: Write what is does
 # =====================================================================================

@@ -1,9 +1,9 @@
-from qecsim.protocols import annotations
+from __future__ import annotations
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from message import Window, Operation
-    from protocols import CodeModel, LayoutModel
+    from .message import Window, Operation
+    from .protocols import CodeModel, LayoutModel
 
 # ===============================================================================
 # SCHEMES
