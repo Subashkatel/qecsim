@@ -44,6 +44,7 @@ class DecodeJob:
     on_done: Optional[Callable[[], None]] = None # set for externally scheduled jobs so they can trigger the next step in the pipeline when the decode is done
     label: str = "" # for logging purposes
     spatial_nodes: Optional[int] = None # Decoding graph nodes per round (spatial size of the decode job)
+    code: Optional[str] = None  # which code this job belongs to (e.g. "surface", "color", "heavyhex", etc.) for code-specific decoding strategies or logs
 
 @dataclass
 class Window:
@@ -107,5 +108,4 @@ class Operation:
         if self.consumes_magic_state is not None:
             return self.consumes_magic_state
         return not self.clifford
-    
     
