@@ -38,7 +38,7 @@ class Engine:
         
     def log(self, who: str, msg: str) -> None:
         """ Log one timestamped line (print it if verbose otherwise send it to the log sink)."""
-        line = f"{fmt(self.now)}] {who}: {msg}"
+        line = f"[{fmt(self.now)}] {who}: {msg}"
         self.log_lines.append(line)
         if self.log_sink is not None:
             self.log_sink(line)
@@ -66,5 +66,5 @@ class Engine:
             self.now = ev.time
             ev.action()
             for m in self.metrics:
-                m.observe(self.now)
+                m.observe(self)
 

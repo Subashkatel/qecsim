@@ -27,8 +27,9 @@ def fmt(ticks : int ) -> str:
 @dataclass(frozen=True)
 class SimConfig:
     """All the changable parameters in one place so its easy to modify"""
-    rounds_us: float = 1.1 # one syndrome round = one parity check cycle 
+    round_us: float = 1.1 # one syndrome round = one parity check cycle
     rounds_per_op: int = 11 # number of rounds per logical operation (two_qubit op + bus)
+    num_units: int = 1             # decoder units in the cluster
 
     t_qc_us: float = 0.15  # chip -> controller latency (microseconds)
     t_cd_us: float = 2.0   # controller -> decoder cluster latency (microseconds)
@@ -37,10 +38,10 @@ class SimConfig:
     t_oc_us: float = 4.0   # orchestrator -> controller latency (microseconds)
     t_cq_us: float = 0.15  # controller -> chip latency (microseconds)
 
-    # decoder_alpha: float = 2.85e-10
-    # decoder_beta: float = 1.2
+    decoder_alpha: float = 2.85e-10
+    decoder_beta: float = 1.2
 
-def __post_init__(self):
+    def __post_init__(self):
         """ This method is called after the dataclass is initialized so it can perform validation."""
         if self.round_us <= 0:
             raise ValueError(f"round_us must be > 0 (got {self.round_us})")
@@ -53,18 +54,18 @@ def __post_init__(self):
                 raise ValueError(f"{name} must be >= 0 (got {getattr(self, name)})")
         if self.decoder_alpha < 0 or self.decoder_beta < 0:
             raise ValueError("decoder_alpha and decoder_beta must be >= 0")
- 
-def make_controller(self, engine: "Engine") -> "Controller":
-    """Build the modular controller from these link-latency knobs. Imported lazily so this
-    module has no import-time dependency on controllers.py (which imports `us` from here)."""
-    from .controllers import ModularController
-    return ModularController(engine,
-                                t_qc=us(self.t_qc_us), t_cd=us(self.t_cd_us),
-                                t_dd=us(self.t_dd_us), t_do=us(self.t_do_us),
-                                t_oc=us(self.t_oc_us), t_cq=us(self.t_cq_us))
 
-def make_decoder(self, code: "CodeModel") -> "Decoder":
-    """Build the default latency-model decoder for the given code (lazy import, as above)."""
-    from .decoders import LatencyModelDecoder
-    return LatencyModelDecoder(d=code.distance,
-                                alpha=self.decoder_alpha, beta=self.decoder_beta)
+    def make_controller(self, engine: "Engine") -> "Controller":
+        """Build the modular controller from these link-latency knobs. Imported lazily so this
+        module has no import-time dependency on controllers.py (which imports `us` from here)."""
+        from .controllers import ModularController
+        return ModularController(engine,
+                                 t_qc=us(self.t_qc_us), t_cd=us(self.t_cd_us),
+                                 t_dd=us(self.t_dd_us), t_do=us(self.t_do_us),
+                                 t_oc=us(self.t_oc_us), t_cq=us(self.t_cq_us))
+
+    def make_decoder(self, code: "CodeModel") -> "Decoder":
+        """Build the default latency-model decoder for the given code (lazy import, as above)."""
+        from .decoders import LatencyModelDecoder
+        return LatencyModelDecoder(d=code.distance,
+                                   alpha=self.decoder_alpha, beta=self.decoder_beta)

@@ -56,7 +56,9 @@ class Window:
     buffer_hi: int # the last round of its look ahead buffer 
     n_rounds: int # number of rounds in this window 
     deps: list = field(default_factory=list) # window level dependencies (list of window indices that must be done before this one can start)
-    committed: bool = False # has this window decode been commited 
+    dependents: list = field(default_factory=list) # reverse edges: window keys that depend on THIS one (wired by the planner; the cluster sends each its boundary when this commits)
+    deps_remaining: int = 0 # how many of `deps` are still uncommitted; the planner sets this to len(deps), the cluster counts it down as boundaries arrive
+    committed: bool = False # has this window decode been commited
     queued: bool = False # has this window beens placed on the ready queue for decoding
     blocked_logged: bool = False # set to true once we have logged that this window is blocked waiting for its dependencies so we don't spam the logs with the same message every round until the dependencies are done 
 
