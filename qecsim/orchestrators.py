@@ -13,6 +13,7 @@ if TYPE_CHECKING:                      # type-only; the controller is wired in a
 #TODO: Write what is does
 # =====================================================================================
 # ORCHESTRATORS
+# Paper does multiple things 
 # =====================================================================================
 
 class PauliFrameOrchestrator:
