@@ -7,16 +7,15 @@ name = "qecsim"
 version = "0.1.0"
 description = "QEC control/decoding simulator package scaffold"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.optional-dependencies]
 stim = ["stim"]
 pymatching = ["pymatching"]
 
-[tool.setuptools]
-package-dir = {"" = "qecsim"}
-
+# Flat layout: the qecsim/ package sits at the repo root. Discover it (and its
+# subpackages qecsim.adapters / qecsim.frontends) from there. No package-dir remap.
 [tool.setuptools.packages.find]
-where = ["qecsim"]
+where = ["."]
 include = ["qecsim*"]
