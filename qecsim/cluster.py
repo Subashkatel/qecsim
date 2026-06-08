@@ -77,9 +77,9 @@ class DecoderCluster:
         self.code = code if code is not None else self.layout.codes()[0]
         # The window/commit policy is a swappable scheme; the default is fixed sliding window.
         self.scheme = scheme if scheme is not None else SlidingWindowScheme()
-        self.d = code.distance
-        self.commit = code.commit_rounds()     # commit region (d rounds for surface code)
-        self.buffer = code.buffer_rounds()     # buffer/lookahead (d rounds for surface code)
+        self.d = self.code.distance
+        self.commit = self.code.commit_rounds()     # commit region (d rounds for surface code)
+        self.buffer = self.code.buffer_rounds()     # buffer/lookahead (d rounds for surface code)
         # ROUNDS seam (D1 fix). rounds-per-operation is a swappable policy. A plain rounds_per_op
         # int is wrapped as FixedRounds (the original behaviour, byte-identical regression); pass
         # rounds_policy=CodeRounds() for per-code rounds so high-distance zones' buffers fit.
@@ -341,6 +341,14 @@ class DecoderCluster:
             self.engine.schedule(self.controller.dec_to_orch_delay(),
                                  lambda: self._deliver_to_orchestrator(op),
                                  label=f"result->orch({op.name})")
+            # RELEASE this op's syndrome RAM now its last window has decoded (arXiv:2511.10633
+            # Sec III: the decoder-cluster RAM holds syndromes only while their window is being
+            # decoded, and that storage is itself a headline cost in the paper). Safe to free here:
+            # all of this op's own windows are committed, and any predecessor whose buffer
+            # overflowed into this op's early rounds already read them -- that predecessor's last
+            # window had to commit before this op's window 0 could (the window dependency). Without
+            # this the store grows monotonically and peak_payloads stops being a real high-water.
+            self.payload_store.pop(op_id, None)
         self._try_dispatch()
         # WORKLOAD COMPLETE: the last window has committed. The cluster does not know about
         # factories or chips -- it just fires the lifecycle callback the wiring installed.
