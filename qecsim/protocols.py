@@ -29,7 +29,8 @@ class DeviceModel(Protocol):
 @runtime_checkable
 class CodeModel(Protocol):
     """ This will provide all the code-specific quantity the control/decode side
-    needs to know to do its job."""
+    needs to know to do its job. like distance, rounds per logical cycle, commit/buffer
+    rounds, decode-graph node and syndrome bit counts."""
     @property
     def name(self) -> str:...
     @property
@@ -72,6 +73,13 @@ class ExecutionPlanner(Protocol):
     def plan(self, ops: list[Operation]) -> WindowPlan: ...
 
 @runtime_checkable
+class RoundPolicy(Protocol):
+    """ Thiis is responsible for deciding how many qec rounds an operation runs for
+    changable so that we can test steady rounds or derived them pre code or compute 
+    them form form other things depending on the operation and the code."""
+    def rounds_for(self, op: "Operation", code: "CodeModel") -> int: ...
+
+@runtime_checkable
 class Decoder(Protocol):
     """ This receives a DecodeJob and answer two seperate questions:
     latency(job) = how many ticks the decode takes 
@@ -80,6 +88,13 @@ class Decoder(Protocol):
 
     def latency(self, job: DecodeJob) -> int: ...
     def decode(self, job: DecodeJob) -> DecodeResult: ...
+
+@runtime_checkable
+class Scheduler(Protocol):
+    """ This is the policy for the decode cluster sheduling ready queue of decode jobs.
+    insert puts a job in the queue, and pop chooses the next job to run."""
+    def insert(self, queue: list, job: DecodeJob) -> None: ...
+    def pop(self, queue: list) -> DecodeJob: ...
 
 @runtime_checkable
 class DecoderService(Protocol):
@@ -105,23 +120,34 @@ class Controller(Protocol):
 @runtime_checkable
 class Orchestrator(Protocol):
     """ """
+    def connect(self, controller: "Controller", decision_sink: Callable) -> None: ...
+    def register_gate(self, gated_op_id: int, gating_op_id: int) -> None: ...
+    def announce_plan(self, plan: WindowPlan) -> None: ...
+    def integrate(self, op: Operation, result: DecodeResult) -> None: ...
+    def on_result(self, op: Operation, result: DecodeResult) -> list[Decision]: ...
     
 
 @runtime_checkable
 class MagicStateFactory(Protocol):
-    """ """
+    """A non - clifford gates asks the factory for a distilled magic state, this provides a
+    way to check it can be done on time or you have to wait."""
     def request(self, op_id: int, callback: Callable[[], None]) -> None: ...
- 
  
 @runtime_checkable
 class QuantumProcessor(Protocol):
-    """ """
+    """The QPU seam it drive the round cadence and emits syndromes through the controller
+    enforces data dependencies and t gate gating and receives the decoded correrction back
+    Load: begins executing the DAG, on_decision(decision) receives a
+    returned correction (releasing a blocked gate). There is `last_finish_time` is a documented
+    attribute, not a checked protocol member"""
     def load(self, ops: list) -> None: ...
     def on_decision(self, decision: Decision) -> None: ...
  
  
 @runtime_checkable
 class Metric(Protocol):
-    """ """
+    """A pluggable observer. The engine calls observe() after every event (a no-op when no
+    metrics are registered, so adding metrics never changes the timing or the trace), and
+    result() returns the final value."""
     def observe(self, engine: "Engine") -> None: ...
     def result(self): ...
