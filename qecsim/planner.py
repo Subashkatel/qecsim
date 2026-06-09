@@ -9,8 +9,20 @@ if TYPE_CHECKING:
 
 #==================================================================================================
 # PLANNER
-# The planner given the operation DAG and the code/layout/scheme, plans out the windows for each
-# operation and tells the orchestrator about them. 
+# The planner, given the operation DAG and the code/layout/scheme, plans out the windows for
+# each operation and the dependency graph between them. This is the orchestrator's offline job
+# from arXiv:2511.10633 Sec III: "the orchestrator determines the decoding windows for each
+# surgery and the sequence of all decoding jobs required ... with their dependencies", and that
+# plan is communicated to the decoder cluster AHEAD OF TIME, so planning costs zero simulated
+# ticks and never sits on the reaction path.
+#
+# SEAM NOTE (windowing studies): the window LAYOUT comes from the DecodingScheme, but the
+# DEPENDENCY wiring between windows is currently fixed HERE (sequential intra-op chain +
+# first-window-on-predecessors). A scheme whose dependency structure differs -- e.g. the
+# parallel A/B-layer windowing of arXiv:2511.10633 Sec II.4 (layer-A windows independent,
+# layer-B windows depend on their A neighbours) or speculative windowing -- needs a planner
+# variant that wires those deps. Swapping the planner is the supported way to do that; the
+# runtime cluster does not change.
 #==================================================================================================
 
 #TODO: This is for testing only, remove it in the future

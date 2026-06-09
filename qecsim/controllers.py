@@ -7,16 +7,30 @@ from .engine import Engine
 from .message import SyndromePayload, Decision
 # ================================================================================
 # CONTROLLER
-# The controller the paper's "modular controller" (arXiv:2511.10633 Sec III).
-# In the paper it is the classical unit attached to the QPU both side reaction path
+# The controller is the classical unit attached to the QPU (arXiv:2511.10633 Sec III;
+# one controller manages ~10^4 physical qubits there). It sits on BOTH sides of the
+# reaction path: outbound it relays each round's syndromes chip -> controller (t_qc)
+# -> decoder cluster (t_cd); inbound it relays conditional instructions orchestrator
+# -> controller (t_oc) -> chip (t_cq). It also owns the two decoder-side link
+# constants: decoder->decoder boundary exchange (t_dd) and decoder->orchestrator
+# result delivery (t_do).
 # ================================================================================
 
 class ModularController:
-    """The default controller implementation"""
+    """The default controller implementation.
+
+    The six link latencies default to Table 2 of arXiv:2511.10633:
+        t_qc = 0.15 us (QPU -> controller, 1 bit/channel)
+        t_cd = 2 us    (controller -> decoders, ~5000 bits)
+        t_dd = 0.5 us  (decoder -> decoder boundary defects, ~100 bits; ~90 bits at d=30)
+        t_do = 1 us    (decoders -> orchestrator, ~50000 bits)
+        t_oc = 4 us    (orchestrator -> controller, ~20000 bits)
+        t_cq = 0.15 us (controller -> QPU, 1 bit/channel)
+    summing to the paper's end-to-end communication time t_com ~= 10 us."""
 
     def __init__(self, engine: Engine, t_qc=us(0.15), t_cd=us(2.0), t_dd=us(0.5),
                  t_do=us(1.0), t_oc=us(4.0), t_cq=us(0.15), log_syndromes=True):
-        """Store the six link latencies (CONSTANTS from Table II)."""
+        """Store the six link latencies (constants from arXiv:2511.10633 Table 2)."""
         self.engine = engine
         self.t_qc = t_qc
         self.t_cd = t_cd

@@ -11,7 +11,12 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SurfaceCodeModel:
-    """Rotated surface code """
+    """Rotated surface code, [[d^2, 1, d]] (arXiv:2411.03202 Sec 2.2). Conventions used
+    here: one logical cycle = d syndrome rounds; decode windows commit d rounds behind a
+    d-round look-ahead buffer (the W = 2d, C = d sliding window -- "conventionally W = d"
+    per window-half in ADaPT arXiv:2605.01149 Sec II-C; arXiv:2511.10633 likewise builds
+    its memory windows from d-sized commit/buffer sub-regions); the per-round decoding
+    graph has ~d^2 nodes (arXiv:2511.10633 evaluates tau_d at N = d^2 per round)."""
     d: int = 3
 
     @property
@@ -54,7 +59,13 @@ class SurfaceCodeModel:
 # TODO: STUB -- structurally correct, but the node/round numbers are placeholders, not validated physics.
 @dataclass(frozen=True)
 class BBCodeModel:
-    """BB CODE """
+    """Bivariate-bicycle "gross" code, [[144,12,12]]: 144 physical qubits encoding 12
+    logical qubits at distance 12 (arXiv:2510.21600; also the dense-memory zone code of the
+    heterogeneous architecture in arXiv:2411.03202 Sec 2.3). Decoded in W = d = 12-round
+    sliding windows with runtime-configurable commit width on FPGA (arXiv:2510.21600
+    Sec 4.1); pair with RelayBPDecoder for the matching latency model. The d-round
+    circuit-level decoding matrix is 936 detectors x 8784 fault mechanisms
+    (arXiv:2511.21660, verified)."""
     n: int = 144      # physical qubits
     k: int = 12       # logical qubits encoded in the block
     d: int = 12       # code distance

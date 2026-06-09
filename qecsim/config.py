@@ -26,11 +26,18 @@ def fmt(ticks : int ) -> str:
 
 @dataclass(frozen=True)
 class SimConfig:
-    """All the changable parameters in one place so its easy to modify"""
+    """All the changable parameters in one place so its easy to modify.
+
+    Defaults are grounded in Khalid et al., arXiv:2511.10633: the six link latencies are
+    Table 2; (decoder_alpha, decoder_beta) are the Table 3 monomial fit tau_d(N)=alpha*N^beta
+    for the Collision Cluster decoder on FPGA. Syndrome-round time is platform-dependent
+    (~1 us superconducting: 1 us/cycle in arXiv:2510.21600; ~0.5 us stabilization rounds in
+    arXiv:2411.10406 Sec I.2.1)."""
     round_us: float = 1.1 # one syndrome round = one parity check cycle
     rounds_per_op: int = 11 # number of rounds per logical operation (two_qubit op + bus)
     num_units: int = 1             # decoder units in the cluster
 
+    # link latencies: Table 2 of arXiv:2511.10633 (sum ~= t_com ~ 10 us)
     t_qc_us: float = 0.15  # chip -> controller latency (microseconds)
     t_cd_us: float = 2.0   # controller -> decoder cluster latency (microseconds)
     t_dd_us: float = 0.5   # decoder -> decoder message passing latency (microseconds)
@@ -38,6 +45,7 @@ class SimConfig:
     t_oc_us: float = 4.0   # orchestrator -> controller latency (microseconds)
     t_cq_us: float = 0.15  # controller -> chip latency (microseconds)
 
+    # tau_d(N) = alpha * N^beta: Collision Cluster FPGA fit, arXiv:2511.10633 Table 3
     decoder_alpha: float = 2.85e-10
     decoder_beta: float = 1.2
 

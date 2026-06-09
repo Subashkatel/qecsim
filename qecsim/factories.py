@@ -35,22 +35,39 @@ class InfiniteFactory:
 # TODO: This is for testing need to fully verify and update it so that its fully realistic
 class DistillationFactory:
     """
-    A 15-to-1 magic state factory, designed based on the paper's behaviour.
- 
-      - `num_units` parallel distillation units run continuously in the background.
-      - Each unit performs an attempt every `cycle_ticks` (= 11 * tau_logical, the
-        11 commuting rotations of the 15-to-1 protocol).
+    A single-level 15-to-1 magic state factory, grounded in arXiv:2511.10633 (Sec on the
+    MSF) and arXiv:2411.04270 Sec II.2.
+
+      - `num_units` parallel distillation units.
+      - Each unit performs an attempt every `cycle_ticks`. arXiv:2511.10633: "each
+        distillation unit requires the implementation of only 11 rotations, producing one
+        magic state every 11*tau_logical" -- hence the examples use cycle_ticks =
+        11 * rounds_per_op * round time. (arXiv:2411.04270 Sec II.2 books 13 logical cycles
+        for a full first-level round: 11 gates + 1 correction cycle + 1 port-emptying cycle;
+        pick cycle_ticks accordingly for that accounting.)
       - On success (probability `p_success`) the unit submits `n_corr` correction-qubit
         decode jobs to the REAL decoder cluster via `decode_service`. Because the 15-to-1
-        rotations COMMUTE, these jobs are independent and decode in PARALLEL (no chain) --
-        but they compete for the same decoder units as the core, which is why the paper
-        budgets ~10% extra decoders for the factory. When all of a state's correction
-        jobs finish, one return trip (`return_ticks`) later the state enters the store.
-        The hold the magic state experiences is therefore EMERGENT (queue wait + parallel
-        decode + return), not a fixed input.
-      - On failure the attempt is discarded and retried (the distillation discard rate).
+        pi/8 rotations COMMUTE, "there are no cross-gadget dependencies" and these jobs
+        decode in PARALLEL (no chain) -- but they compete for the same decoder units as the
+        core, which is why arXiv:2511.10633 budgets ~10% additional decoders for the MSF.
+        When all of a state's correction jobs finish, one return trip (`return_ticks`)
+        later the state enters the store. The hold a magic state experiences is therefore
+        EMERGENT (queue wait + parallel decode + return), not a fixed input -- this is the
+        coupling of factory output to decoder reaction time both papers describe (the
+        correction qubit "must be held in storage until the decoder processes the last
+        dependent measurement for that gadget").
+      - On failure the attempt is discarded and retried (the distillation discard rate;
+        arXiv:2411.04270 Eq. 8 gives P = 1 - 15*e_in - 356*e_cliff for 15:1).
       - `request` is served from the store FIFO; an empty store STALLS the requester
         (the supply stall).
+
+    NOTE (deviation from arXiv:2411.04270): production here is DEMAND-DRIVEN -- units run
+    only while requests are unserved -- whereas the paper's steady-state model keeps units
+    running continuously with buffer registers absorbing the stochastic output (its rate
+    equations, Eqs. 6-9, assume continuous production). Demand-driven start-up UNDERSTATES
+    both the factory's decoder load and its ability to hide latency behind a warm buffer;
+    use initial_store (warm start) to approximate the steady state, or see
+    MultiLevelDistillationFactory for the rate-matched chain.
     """
     def __init__(self, engine: Engine, num_units: int, cycle_ticks: int,
                  decode_service: "DecodeService", corr_rounds: int, n_corr: int = 11,
@@ -154,11 +171,15 @@ class DistillationFactory:
 
 @dataclass
 class DistillLevel:
-    """One distillation level of a multi-level MSF (Silva et al., arXiv:2411.04270, II B)."""
+    """One distillation level of a multi-level MSF (Silva et al., arXiv:2411.04270 Sec II.2).
+    O = 13 at the first level (11 gates + 1 correction cycle + 1 cycle to empty the
+    distillation port); O = 15 at higher levels (two additional logical steps to load the
+    four data qubits, due to topological constraints). A round takes O * d * W, where W is
+    the parity-check (round) time."""
     units: int            # u_l : parallel distillation units at this level
     d: int                # code distance d_l at this level (increasing up the chain)
     O: int = 13           # logical cycles per distillation round (13 first level, 15 higher)
-    P: float = 1.0        # success probability of a distillation round at this level
+    P: float = 1.0        # success probability (arXiv:2411.04270 Eq. 8: 1-15e_in-356e_cliff)
  
 # TODO: This is for testing need to fully verify and update it so that its fully realistic
 class MultiLevelDistillationFactory:
@@ -173,16 +194,23 @@ class MultiLevelDistillationFactory:
         after O_l*d_l*W ticks, produces N higher-fidelity states with success probability P
         (failure discards the M inputs and retries). For 15:1: M=15, N=1, O=13/15.
       - Buffers between levels (self.buffer[l]) hold produced states so a unit can begin its
-        next round without waiting for downstream consumption -- the paper's buffer registers
-        that keep the chain in long-term steady state.
+        next round without waiting for downstream consumption -- the paper's "buffer register
+        between levels where magic states can remain idle while waiting to be consumed
+        without blocking the start of the next distillation cycle" (Sec II.2), needed because
+        distillation is probabilistic.
       - The top level L feeds the core via request(); ONE final state costs M^L prepared
         states cascading up the chain (e.g. 225 prepared states for L=2, M=15).
- 
+
     Production is DEMAND-DRIVEN (pull): a core request propagates demand down the chain via
-    the rate relations D_{l-1} >= C_l (paper Eqs 6-9); each level distills only what is needed
-    downstream and inputs allow, so nothing free-runs. The post-corrected protocol's
-    correction-qubit decoding is routed through the decoder cluster (DecodeService), so the
-    factory's classical load competes with the core for decoder units.
+    the paper's rate relations (production rate Eq. 6, consumption rate Eq. 7, steady-state
+    balance D_{l-1} = C_l Eq. 9); each level distills only what is needed downstream and
+    inputs allow, so nothing free-runs. (The paper itself solves the steady state with units
+    running CONTINUOUSLY; the pull loop here reaches the same rates once demand is steady but
+    under-produces during start-up -- warm the buffers to model the paper's long-term steady
+    state.) The post-corrected protocol's correction-qubit decoding is routed through the
+    decoder cluster (DecodeService), so the factory's classical load competes with the core
+    for decoder units, coupling magic-state supply to decoder latency (the paper's Eq. 14
+    correction-storage term scales with reaction time gamma).
     """
     def __init__(self, engine: Engine, levels: list[DistillLevel], *,
                  W_ticks: int, M: int = 15, N: int = 1,

@@ -16,8 +16,10 @@ if TYPE_CHECKING:                      # type-only; these collaborators are hand
                             CodeModel, DecodingScheme, LayoutModel, RoundsPolicy)
 # ========================================================================================
 # CLUSTER
-# This module define the decoder cluster, the papers window manger and the main peice of 
-# the decoding side.  
+# This module defines the decoder cluster -- the paper's decoder cluster with its
+# "efficient workload manager that queues the decoding jobs and communicates dependencies
+# between them", where the dependencies are "boundaries of committed decoding regions from
+# prior decoding windows" (arXiv:2511.10633 Sec III) -- the main piece of the decoding side.
 # It receives the WindowPlan from the orchestrator's planner ahead of time (load_execution_plan),
 # runs the queue against it, exchanges committed window boundaries between decoders (the t_dd hop),
 # and DELIVERS each finished operation result to the orchestrator (the t_do hop) where, after
@@ -258,6 +260,9 @@ class DecoderCluster:
                                 f"has all its data, but is WAITING for the boundary from "
                                 f"{w.deps_remaining} predecessor window(s)")
             return
+        # NOTE: deadline is currently just the enqueue time, so EarliestDeadlineScheduler
+        # degenerates to FIFO for window jobs. A real deadline would come from the plan
+        # (e.g. when this window's result gates the reaction path); see docs/README.md.
         job = DecodeJob(op_id=w.op_id, window_id=w.k, n_rounds=w.n_rounds,
                         ready_time=self.engine.now, deadline=self.engine.now,
                         spatial_nodes=self._spatial_nodes(op),

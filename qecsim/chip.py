@@ -161,6 +161,10 @@ class Chip:
         # The recursive _emit_idle_round stops itself the moment the successor is released (its
         # gate returns in on_decision) or has started. Routed via on_memory_round (a count) as
         # before; switch to on_syndrome_arrival if you want the idle rounds actually decoded.
+        # KNOWN SIMPLIFICATION: in arXiv:2511.10633 these memory stabilization rounds DO
+        # require decoding (in parallel with the surgery decoding) and contribute decoder
+        # load and storage error; here they only fill window buffers and are not decoded,
+        # so decoder utilization during reaction waits is slightly UNDERSTATED.
         if op.has_successor and self._has_waiting_gated_successor(op.id):
             self.engine.log("Chip",
                             f"{op.name} patch idles (successor gated on a decode); "

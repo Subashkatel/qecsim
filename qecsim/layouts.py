@@ -43,10 +43,17 @@ class UniformLayout:
 class ZonedLayout:
     """A HETEROGENEOUS QPU: patches are assigned to codes by zone. Built from an explicit
     {patch_id: CodeModel} assignment plus a default code for any unlisted patch.
- 
-    Grounded in arXiv:2411.03202: a 'gross' bivariate-bicycle code as a dense memory zone and
-    surface codes as compute zones, on one machine. The two rules below follow from each code
-    being decoded separately (BB by BP+OSD, surface by MWPM):
+
+    Grounded in arXiv:2411.03202 (HetEC): surface-code blocks handle compute ("Clifford and
+    non-Clifford computations assisted by magic states") while gross-code [[144,12,12]]
+    blocks serve as dense logical memory, joined by an ancilla bus (103 physical qubits in
+    the paper, Sec 2.4.1) for inter-code data movement via automorphism + teleportation
+    (Sec 3.2); headline saving up to 6.42x fewer physical qubits for up to 3.43x more
+    execution time. (arXiv:2604.06319 pushes the same heterogeneous idea to a 138x qubit
+    reduction under detailed accounting.) That paper leaves decoder coordination between
+    codes unspecified, so the two rules below are THIS simulator's modeling choices, which
+    follow from each code being decoded separately (BB by BP, surface by MWPM) -- the G1
+    per-code decoder map in the cluster:
  
       - code_for_op(op): the MOST DEMANDING (largest-distance) code among the operation's
         patches. A single-zone op -> that zone's code. A zone-straddling op (a movement/merge

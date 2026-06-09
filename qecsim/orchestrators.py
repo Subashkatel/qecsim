@@ -9,10 +9,22 @@ from .message import Operation, DecodeResult, Decision, WindowPlan
 if TYPE_CHECKING:                      # type-only; the controller is wired in at runtime via connect()
     from .protocols import Controller
 
-#TODO: Write what is does
 # =====================================================================================
 # ORCHESTRATORS
-# Paper does multiple things 
+# The orchestrator of arXiv:2511.10633 Sec III. In the paper it: (1) parses the quantum
+# program (surgery IR) into physical stabilizer circuits; (2) determines the decoding
+# windows for each surgery and the sequence of all decoding jobs with their dependencies,
+# communicated to the decoder cluster AHEAD OF TIME (so planning is off the reaction
+# path); (3) stores the physical and logical Pauli frames, updates them with decoding
+# results, and determines logical measurement outcomes; (4) updates subsequent logical
+# operations that are CONDITIONAL on those outcomes before they are parsed/executed.
+#
+# In this simulator: (1) is the InputFrontend seam, (2) is the WindowPlanner (the
+# orchestrator announces the plan and the wiring hands it to the cluster), and (3)+(4)
+# are this module. Only non-Clifford outcomes trigger an instruction back to the QPU
+# (the t_oc + t_cq hops); Clifford results are pure Pauli-frame updates that stay here,
+# applied in classical software -- which is why a Clifford decode never pays the
+# return-path latency.
 # =====================================================================================
 
 class PauliFrameOrchestrator:

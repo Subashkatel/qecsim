@@ -119,7 +119,11 @@ class Controller(Protocol):
 
 @runtime_checkable
 class Orchestrator(Protocol):
-    """ """
+    """The orchestrator seam (arXiv:2511.10633 Sec III): owns the Pauli frames, integrates
+    decode results into them, decides conditional logical operations from decoded outcomes,
+    and dispatches those decisions back to the chip through the controller. announce_plan
+    marks the compile-time handoff of the window/job plan to the decoder cluster (0 ticks,
+    off the reaction path). Swap this to study a different orchestration policy."""
     def connect(self, controller: "Controller", decision_sink: Callable) -> None: ...
     def register_gate(self, gated_op_id: int, gating_op_id: int) -> None: ...
     def announce_plan(self, plan: WindowPlan) -> None: ...
