@@ -18,7 +18,7 @@ class Event:
     label: str = field(compare=False, default="")
 
 class Engine:
-    """A minimal discrete event simulator a clock and a priority queue of events."""
+    """A minimal discrete event simulator: a clock plus a priority queue of events."""
     def __init__(self, verbose: bool = True):
         """ Create an empty simulator with the clock at 0 and an empty event queue."""
         self.now : int = 0
@@ -46,7 +46,7 @@ class Engine:
             print(line)
 
     def add_metric(self, metric):
-        """Add a metric to be observed at every event.(We will use later to track differnt performance metircs of what we are simulating)"""
+        """Add a metric to be observed at every event (used to track different performance metrics of what we are simulating)."""
         self.metrics.append(metric)
         return metric
     
@@ -59,6 +59,7 @@ class Engine:
         while self._q:
             # check if the next event is in the future 
             if until is not None and self._q[0].time > until:
+                self.now = until # advance the clock to the 'until' time and end the simulation
                 break
             ev = heapq.heappop(self._q)
             if ev.time < self.now:
