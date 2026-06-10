@@ -11,7 +11,7 @@ import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from qecsim import (build_and_run, three_cnot_circuit, cnot_plus_two_t_circuit,
-                    independent_t_circuit, PresetLatencyDecoder, RelayBPDecoder,
+                    independent_t_circuit, three_cnot_six_qubits_circuit, PresetLatencyDecoder, RelayBPDecoder,
                     DistillationFactory, DecoderUtilization, ReadyQueueStats, us,
                     ParallelWindowScheme, WindowLatencyBreakdown)
 from qecsim.frontends.circuit import CircuitFrontend
@@ -66,10 +66,15 @@ def example5():
         print("   per-window stage means (us): " +
               ", ".join(f"{s}={stages[s]['mean'] / 1e6:.2f}"
                         for s in ("buffer_fill", "dep_block", "queue_wait", "service")))
-
+        
+def example6():
+    """"""
+    build_and_run(three_cnot_six_qubits_circuit(), num_units=1, d=D, rounds_per_op=RPO,
+                  decoder=PresetLatencyDecoder(1.0),
+                  title="6) THREE CNOTs, 6 qubits, 1 decoder unit")
 
 # example number -> function. Add a new example by registering it here.
-EXAMPLES = {1: example1, 2: example2, 3: example3, 4: example4, 5: example5}
+EXAMPLES = {1: example1, 2: example2, 3: example3, 4: example4, 5: example5, 6: example6}
 
 
 def main(argv):

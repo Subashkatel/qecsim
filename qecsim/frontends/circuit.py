@@ -71,6 +71,18 @@ def independent_t_circuit(n: int = 6) -> list[Operation]:
            for i in range(n)]
     return _wire_circuit(ops)
 
+def three_cnot_six_qubits_circuit() -> list[Operation]:
+    """The standard demo circuit -- three Clifford CNOTs:
+        Op0: CNOT q0,q1     Op1: CNOT q2,q3     Op2: CNOT q1,q3
+    all of them are disjoint, so they run in parallel."""
+
+    ops = [
+        Operation(0, "Op0:CNOT(q0,q1)", (0, 1), clifford=True),
+        Operation(1, "Op1:CNOT(q2,q3)", (3, 4), clifford=True),
+        Operation(2, "Op2:CNOT(q1,q3)", (2, 5), clifford=True),
+    ]
+    return _wire_circuit(ops)
+
 
 # ===========================================================================
 # Input frontends (the InputFrontend seam). CircuitFrontend wraps a prebuilt op list;
