@@ -7,8 +7,8 @@ if TYPE_CHECKING:                      # hints only; lazy annotations mean no ru
     from .protocols import CodeModel
 # ====================================================================
 # LAYOUTS
-# This module defines the qpu layout and code assignment so single 
-# machine can be heterogeneous. 
+# This module defines the QPU layout and code assignment, so a single
+# machine can be heterogeneous.
 # ====================================================================
 # TODO: This is for testing need to double check
 class UniformLayout:
