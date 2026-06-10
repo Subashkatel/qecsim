@@ -6,10 +6,11 @@
 
 
 from __future__ import annotations
- 
+
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
- 
+
 from .config import fmt
 from .engine import Engine
 
@@ -17,9 +18,25 @@ if TYPE_CHECKING:
     from .protocols import DecodeService
 
 
+@dataclass
+class StateTrace:
+    """Per-magic-state provenance: when each production stage happened (ticks). Lets a
+    MagicStateLatency metric decompose how long a state takes under a given production
+    strategy x decoder strategy -- in particular `t_corr_done - t_phys_done`, the
+    correction-decode stage, is where decoder-cluster contention shows up (the coupling
+    of factory output to reaction time, arXiv:2511.10633 / arXiv:2411.04270 Eq. 14)."""
+    state_id: int
+    t_distill_start: int            # the successful attempt began distilling
+    t_phys_done: int                # physical distillation time elapsed
+    t_corr_submit: int              # correction-qubit decode jobs entered the cluster
+    t_corr_done: Optional[int] = None   # last correction decode returned
+    t_released: Optional[int] = None    # state entered the store (after return trip)
+    t_delivered: Optional[int] = None   # handed to a consumer
+
+
 # TODO: This is for testing need to fully verify and update it so that its fully realistic
 class InfiniteFactory:
-    """Simple factory that always has a magic state in stock)."""
+    """Simple factory that always has a magic state in stock."""
     def __init__(self, engine: Engine):
         """Just keep a handle to the engine."""
         self.engine = engine
@@ -72,7 +89,8 @@ class DistillationFactory:
     def __init__(self, engine: Engine, num_units: int, cycle_ticks: int,
                  decode_service: "DecodeService", corr_rounds: int, n_corr: int = 11,
                  return_ticks: int = 0, p_success: float = 1.0, seed: int = 0,
-                 initial_store: int = 0):
+                 initial_store: int = 0, production: str = "demand",
+                 buffer_capacity: Optional[int] = None):
         """Set up a single-level factory: units, cycle time, success rate, store."""
         import random
         self.engine = engine
@@ -84,7 +102,18 @@ class DistillationFactory:
         self.return_ticks = return_ticks
         self.p_success = p_success
         self.rng = random.Random(seed)
- 
+        # PRODUCTION MODE. "demand" (default, original behaviour): units run only while a
+        # request is unserved. "continuous": units free-run, filling the store up to
+        # `buffer_capacity` -- the paper's steady state, where finite buffer registers
+        # absorb the stochastic output (arXiv:2411.04270 Sec II.2, rate Eqs. 6-9).
+        if production not in ("demand", "continuous"):
+            raise ValueError(f"production must be 'demand' or 'continuous' (got {production!r})")
+        if production == "continuous" and (buffer_capacity is None or buffer_capacity < 1):
+            raise ValueError("continuous production needs buffer_capacity >= 1 "
+                             "(the paper's buffer registers are finite)")
+        self.production = production
+        self.buffer_capacity = buffer_capacity
+
         self.store = initial_store             # warm start: states already in stock
         self.waiting: list[tuple[int, Callable[[], None]]] = []
         self.produced = 0
@@ -94,31 +123,45 @@ class DistillationFactory:
         self.total_stall = 0
         self._stall_start: dict[int, int] = {}
         self._shutdown = False
-        # NOTE: production is DEMAND-DRIVEN. Units are launched by _maybe_start() only
-        # when there is an unserved request; the factory does not free-run on a timer.
- 
+        # per-state provenance (StateTrace), in production order; bounded like the
+        # orchestrator's history so utility-scale runs don't grow without limit.
+        self.traces: deque = deque(maxlen=4096)
+        self._ready_traces: list[StateTrace] = []   # released, awaiting delivery (FIFO)
+        self._next_state_id = 0
+        if production == "continuous":             # free-run from t=0, no request needed
+            self.engine.schedule(0, self._maybe_start, label="factory_start")
+
     def shutdown(self) -> None:
         """Stop launching new attempts (called when the circuit is complete)."""
         self._shutdown = True
- 
+
     def _maybe_start(self) -> None:
-        """Launch distillation attempts only while there is unmet demand -- a waiting
-        request not already covered by a state currently being distilled or decoded.
-        Idle units stay idle; the factory never produces states nobody asked for."""
-        while (not self._shutdown
-               and self.busy_units < self.num_units
-               and len(self.waiting) > self.busy_units + self.in_flight):
+        """Launch distillation attempts while there is unmet demand (a waiting request not
+        already covered by a state being distilled or decoded) -- or, in continuous mode,
+        while the store (counting everything in the pipeline) is below buffer_capacity."""
+        while not self._shutdown and self.busy_units < self.num_units:
+            demand = len(self.waiting) > self.busy_units + self.in_flight
+            stocking = (self.production == "continuous"
+                        and self.store + self.in_flight + self.busy_units
+                        < self.buffer_capacity + len(self.waiting))
+            if not (demand or stocking):
+                break
             self.busy_units += 1
             self.engine.schedule(self.cycle_ticks, self._attempt_done,
                                  label="distill_attempt")
- 
+
     def _attempt_done(self) -> None:
         """A distillation attempt finished; on success, queue its correction decode."""
         self.busy_units -= 1
         if self.rng.random() < self.p_success:
             self.in_flight += 1
             self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
-            remaining = {"n": self.n_corr}
+            trace = StateTrace(state_id=self._next_state_id,
+                               t_distill_start=self.engine.now - self.cycle_ticks,
+                               t_phys_done=self.engine.now,
+                               t_corr_submit=self.engine.now)
+            self._next_state_id += 1
+            remaining = {"n": self.n_corr, "trace": trace}
             self.engine.log("Factory",
                             f"a unit distilled a state; submitting {self.n_corr} "
                             f"correction-qubit decode jobs to the cluster (parallel)")
@@ -130,19 +173,23 @@ class DistillationFactory:
         else:
             self.engine.log("Factory", "a unit's distillation DISCARDED, retrying")
         self._maybe_start()                    # keep going only if demand remains
- 
+
     def _corr_done(self, remaining: dict) -> None:
         """A correction decode finished; the state is now ready in the store."""
         remaining["n"] -= 1
         if remaining["n"] == 0:
-            self.engine.schedule(self.return_ticks, self._release,
+            remaining["trace"].t_corr_done = self.engine.now
+            self.engine.schedule(self.return_ticks,
+                                 lambda tr=remaining["trace"]: self._release(tr),
                                  label="distill_release")
- 
-    def _release(self) -> None:
+
+    def _release(self, trace: StateTrace) -> None:
         """Hand a finished state to the oldest waiting request."""
         self.in_flight -= 1
         self.store += 1
         self.produced += 1
+        trace.t_released = self.engine.now
+        self._ready_traces.append(trace)
         self.engine.log("Factory", f"magic state ready (store now {self.store})")
         self._fulfil()
         self._maybe_start()
@@ -161,6 +208,10 @@ class DistillationFactory:
         """Deliver a state to a waiting request and log it."""
         while self.store > 0 and self.waiting:
             self.store -= 1
+            if self._ready_traces:             # warm-start states have no trace
+                trace = self._ready_traces.pop(0)
+                trace.t_delivered = self.engine.now
+                self.traces.append(trace)
             op_id, cb = self.waiting.pop(0)
             waited = self.engine.now - self._stall_start.pop(op_id, self.engine.now)
             self.total_stall += waited
@@ -168,6 +219,7 @@ class DistillationFactory:
             self.engine.log("Factory",
                             f"  -> delivered to op#{op_id} (store now {self.store}){tag}")
             cb()
+            self._maybe_start()                # continuous mode: refill the slot just taken
 
 @dataclass
 class DistillLevel:
@@ -216,15 +268,26 @@ class MultiLevelDistillationFactory:
                  W_ticks: int, M: int = 15, N: int = 1,
                  prep_units: int = 1, prep_O: int = 2, prep_d: int = 3, prep_P: float = 1.0,
                  decode_service: Optional["DecodeService"] = None,
-                 corr_rounds: int = 0, n_corr: int = 0, seed: int = 0):
+                 corr_rounds: int = 0, n_corr: int = 0, seed: int = 0,
+                 production: str = "demand", buffer_capacity: Optional[int] = None):
         """Set up the multi-level supply chain (prep -> levels -> core)."""
         import random
+        # PRODUCTION MODE, as in DistillationFactory: "demand" (default) pulls only for
+        # unserved requests; "continuous" keeps the chain filling the top-level buffer to
+        # `buffer_capacity` -- the paper's continuously-running steady state whose rates
+        # are Eqs. 6-9 (arXiv:2411.04270).
+        if production not in ("demand", "continuous"):
+            raise ValueError(f"production must be 'demand' or 'continuous' (got {production!r})")
+        if production == "continuous" and (buffer_capacity is None or buffer_capacity < 1):
+            raise ValueError("continuous production needs buffer_capacity >= 1 "
+                             "(the paper's buffer registers are finite)")
+        self.production = production
+        self.buffer_capacity = buffer_capacity
         self.engine = engine
         self.levels = levels                       # levels[0] is level 1, ... levels[L-1] is level L
         self.L = len(levels)
         self.M = M
         self.N = N
-        self.W = W_ticks                           # per-round (parity-check) time
         self.prep_units = prep_units
         self.prep_time = prep_O * prep_d * W_ticks
         self.prep_P = prep_P
@@ -247,7 +310,9 @@ class MultiLevelDistillationFactory:
         self._stall_start: dict[int, int] = {}
         self.peak_in_flight = 0
         self._shutdown = False
- 
+        if production == "continuous":          # free-run from t=0, no request needed
+            self.engine.schedule(0, self._drive, label="factory_start")
+
     def shutdown(self) -> None:
         """Stop the production loop."""
         self._shutdown = True
@@ -287,7 +352,12 @@ class MultiLevelDistillationFactory:
         progress = True
         while progress:
             progress = False
+            # demand mode: produce for unserved requests only. Continuous mode: also keep
+            # the top-level buffer filled to capacity (the deficit loop below already nets
+            # out what is in buffers and mid-round, so this never over-produces).
             need = {L: len(self.waiting)}
+            if self.production == "continuous":
+                need[L] += self.buffer_capacity
             for l in range(L, 0, -1):
                 deficit = max(0, need[l] - self.buffer[l] - self.busy[l] * N)
                 rounds = math.ceil(deficit / N) if deficit > 0 else 0
