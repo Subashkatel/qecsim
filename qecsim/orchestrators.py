@@ -54,8 +54,9 @@ class PauliFrameOrchestrator:
         self.decision_sink: Optional[Callable] = None
 
     def connect(self, controller: "Controller", decision_sink: Callable) -> None:
-        """Connect the orchestrator to the controller and tells where the controller 
-        should send the decisions it returns. """
+        """Wire the decision return path: this orchestrator's decisions are relayed
+        through `controller` (paying t_oc + t_cq) and delivered to `decision_sink`
+        (the chip's on_decision callback in the default wiring)."""
         self.controller = controller
         self.decision_sink = decision_sink
 
