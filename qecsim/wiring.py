@@ -167,9 +167,11 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
         print(f"  reaction tail (chip->fully done): {fmt(last_event - chip_done)}")
         peak_q = max((q for _, q in getattr(cluster, "queue_log", [])), default=0)
         print(f"  peak ready-queue length         : {peak_q}")
-        # the decoder-cluster syndrome RAM high-water (a headline storage cost of the
-        # cluster in arXiv:2511.10633 Sec III), in retained payloads
-        print(f"  peak syndrome RAM (payloads)    : {getattr(cluster, 'peak_payloads', 0)}")
+        # TODO: verify the the cluster peak payload is calculated correctly ---
+        # NOTE: cluster.peak_payloads (syndrome RAM high-water, arXiv:2511.10633 Sec III)
+        # is still measured but deliberately NOT printed: it counts payloads RESIDENT under
+        # the per-op release rule, not the minimal live set a cluster must provision, and
+        # we don't want to show a storage number until that accounting is verified.
         # factory stats, duck-typed: any factory exposing the scalar counters gets the
         # lines (a custom factory without them simply prints nothing extra).
         if isinstance(getattr(factory, "produced", None), int):
