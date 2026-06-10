@@ -2,12 +2,13 @@ from __future__ import annotations
  
 from typing import TYPE_CHECKING
  
+from .config import us
 from .engine import Engine
 from .message import Operation, SyndromePayload, Decision
 
-if TYPE_CHECKING:                     
-    from .cluster import DecoderCluster
-    from .protocols import DeviceModel, Controller, MagicStateFactory
+if TYPE_CHECKING:
+    from .protocols import (DeviceModel, Controller, MagicStateFactory,
+                            WorkloadManager)
 
 # =================================================================================================
 # CHIP
@@ -25,8 +26,9 @@ class Chip:
     dependencies clear, gates non-Clifford gates until their correction returns, 
     and emits idle rounds while waiting."""
     def __init__(self, engine: Engine, device: DeviceModel, controller: Controller,
-                 cluster: DecoderCluster, factory: MagicStateFactory,
-                 round_ticks: int, rounds_per_op: int, code_distance: int):
+                 cluster: WorkloadManager, factory: MagicStateFactory,
+                 round_ticks: int, rounds_per_op: int, code_distance: int,
+                 decode_idle_rounds: bool = False):
         """Wire the chip to its device, controller, cluster, and factory; set the round cadence."""
         self.engine = engine
         self.device = device
@@ -34,8 +36,18 @@ class Chip:
         self.cluster = cluster
         self.factory = factory
         self.round_ticks = round_ticks
-        self.rounds_per_op = rounds_per_op    # how long an operation runs (temporal)
+        # NOTE: rounds_per_op is accepted for the wiring's construction signature but not
+        # stored -- each operation's temporal length comes from cluster.rounds_for(op)
+        # (the ROUNDS policy), so the chip can never disagree with the planner/cluster.
         self.code_distance = code_distance    # patch distance; also the buffer size
+        # IDLE-ROUND DECODING (off by default = original trace). arXiv:2511.10633: the
+        # stabilization rounds a waiting patch keeps measuring must themselves be decoded
+        # (they contribute decoder load and storage error). When True, every commit_rounds()
+        # idle rounds the chip submits one memory-window decode job through the SAME
+        # DecoderService path the factory uses, so reaction-time waits load the cluster.
+        # Stage-1 limitation (see docs/DESIGN.md Sec 5): these ad-hoc memory jobs do not
+        # exchange boundaries with each other.
+        self.decode_idle_rounds = decode_idle_rounds
  
         self.ops: dict[int, Operation] = {}
         self.busy_qubits: set = set()
@@ -49,6 +61,19 @@ class Chip:
         # otherwise schedule forever); generous vs any realistic reaction time.
         self.MAX_IDLE_ROUNDS = 100 * code_distance
  
+    # ---- round cadence ------------------------------------------------------
+    def _round_ticks_for(self, op: Operation) -> int:
+        """This operation's syndrome-round time. A code may define its own round_us (so
+        heterogeneous zones can run different physical cycle times); otherwise the chip's
+        global round_ticks applies -- the default, which reproduces the original cadence."""
+        rt = getattr(self.cluster.layout.code_for_op(op), "round_us", None)
+        return us(rt) if rt is not None else self.round_ticks
+
+    def _round_ticks_for_patch(self, patch) -> int:
+        """An idling patch's round time, via ITS code (same fallback as above)."""
+        rt = getattr(self.cluster.layout.code_for_patch(patch), "round_us", None)
+        return us(rt) if rt is not None else self.round_ticks
+
     def load(self, ops: list[Operation]) -> None:
         """Register all operations, then build the decoder windows."""
         for op in ops:
@@ -120,19 +145,26 @@ class Chip:
         kind = "Clifford" if op.clifford else "NON-Clifford"
         gate = "" if op.gated_by is None else f" [released by op#{op.gated_by}]"
         self.engine.log("Chip", f"START {op.name}  ({kind}, qubits {op.qubits}){gate}")
-        self.engine.schedule(self.round_ticks, lambda: self._round(op, 1),
+        self.engine.schedule(self._round_ticks_for(op), lambda: self._round(op, 1),
                              label=f"round1({op.name})")
  
     # ---- per-round cadence --------------------------------------------------
     def _round(self, op: Operation, r: int) -> None:
         """Emit one syndrome round through the controller to the decoder cluster."""
         total = self.cluster.rounds_for(op)          # this op's length via the ROUNDS policy (D1)
-        payload = self.device.round_payload(op, r)
+        # PER-PATCH seam: a device may emit one payload PER PATCH for this round (the
+        # optional round_payloads hook); the default single-payload contract is unchanged.
+        # Each fragment is tagged with the fragment count so the cluster only counts the
+        # round as arrived once all of them are in.
+        emit = getattr(self.device, "round_payloads", None)
+        payloads = emit(op, r) if emit is not None else [self.device.round_payload(op, r)]
         self.engine.log("Chip", f"{op.name} fires round {r}/{total}")
         # hand the round's syndromes to the controller, which relays them to the decoder
-        self.controller.relay_syndrome(payload, self.cluster.on_syndrome_arrival)
+        for payload in payloads:
+            payload.n_fragments = len(payloads)
+            self.controller.relay_syndrome(payload, self.cluster.on_syndrome_arrival)
         if r < total:
-            self.engine.schedule(self.round_ticks, lambda: self._round(op, r + 1),
+            self.engine.schedule(self._round_ticks_for(op), lambda: self._round(op, r + 1),
                                  label=f"round{r+1}({op.name})")
         else:
             self._body_done(op)
@@ -159,18 +191,18 @@ class Chip:
         # fixed burst would starve the decoder cluster if the reaction took longer than d rounds
         # (e.g. under contention the round trip can be several*d), misaligning the window buffers.
         # The recursive _emit_idle_round stops itself the moment the successor is released (its
-        # gate returns in on_decision) or has started. Routed via on_memory_round (a count) as
-        # before; switch to on_syndrome_arrival if you want the idle rounds actually decoded.
-        # KNOWN SIMPLIFICATION: in arXiv:2511.10633 these memory stabilization rounds DO
-        # require decoding (in parallel with the surgery decoding) and contribute decoder
-        # load and storage error; here they only fill window buffers and are not decoded,
-        # so decoder utilization during reaction waits is slightly UNDERSTATED.
+        # gate returns in on_decision) or has started. Idle rounds are routed via
+        # on_memory_round (a count that fills window buffers); whether they are ALSO decoded
+        # is the decode_idle_rounds flag set in __init__ -- arXiv:2511.10633 says these memory
+        # stabilization rounds do require decoding (they contribute decoder load and storage
+        # error), so leaving the flag off slightly UNDERSTATES decoder utilization during
+        # reaction waits (the byte-identical default; see __init__ for the trade-off).
         if op.has_successor and self._has_waiting_gated_successor(op.id):
             self.engine.log("Chip",
                             f"{op.name} patch idles (successor gated on a decode); "
                             f"emitting memory rounds every round until the correction returns")
             patch = op.patches[0] if op.patches else (op.qubits[0] if op.qubits else 0)
-            self.engine.schedule(self.round_ticks,
+            self.engine.schedule(self._round_ticks_for_patch(patch),
                                  lambda oid=op.id, pt=patch: self._emit_idle_round(oid, pt, 1),
                                  label=f"idle-tick({op.name},1)")
  
@@ -191,7 +223,18 @@ class Chip:
         self.controller.relay_syndrome(
             SyndromePayload(op_id, patch, k),
             lambda p, o=op_id: self.cluster.on_memory_round(o))
-        self.engine.schedule(self.round_ticks,
+        if self.decode_idle_rounds:
+            # every commit-region's worth of idle rounds becomes one memory-window decode
+            # job (commit + buffer rounds), sized to this patch's code -- the decoder load
+            # of waiting in storage (arXiv:2511.10633).
+            code = self.cluster.layout.code_for_patch(patch)
+            if k % code.commit_rounds() == 0:
+                self.cluster.submit_decode(
+                    code.commit_rounds() + code.buffer_rounds(),
+                    on_done=lambda: None, code=code.name,
+                    spatial_nodes=code.spatial_nodes(1),
+                    label=f"mem({self.ops[op_id].name},r{k})")
+        self.engine.schedule(self._round_ticks_for_patch(patch),
                              lambda oid=op_id, pt=patch, kk=k: self._emit_idle_round(oid, pt, kk + 1),
                              label=f"idle-tick({self.ops[op_id].name},{k + 1})")
  
