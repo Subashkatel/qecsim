@@ -10,7 +10,7 @@ from .devices import TimingOnlyDevice
 from .orchestrators import PauliFrameOrchestrator
 from .schedulers import FifoScheduler
 from .cluster import DecoderCluster
-from .factories import InfiniteFactory, DistillationFactory
+from .factories import InfiniteFactory
 from .chip import Chip
 from .planner import WindowPlanner
 
@@ -18,7 +18,8 @@ if TYPE_CHECKING:                      # type-only; defaults are built from the 
     from .message import Operation
     from .protocols import (MagicStateFactory, Decoder, Controller, Orchestrator,
                            Scheduler, DeviceModel, CodeModel, DecodingScheme,
-                           LayoutModel, InputFrontend, RoundsPolicy)
+                           LayoutModel, InputFrontend, RoundsPolicy,
+                           DecoderRouter, DeadlinePolicy, ExecutionPlanner)
 
 # ============================================================================================
 # WIRING
@@ -38,10 +39,16 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
                   decoder: Optional[Decoder] = None,
                   decoders: Optional[dict] = None,
                   controller: Optional[Controller] = None,
+                  make_controller: Optional[Callable[[Engine], "Controller"]] = None,
                   orchestrator: Optional[Orchestrator] = None,
                   make_orchestrator: Optional[Callable[[Engine], "Orchestrator"]] = None,
                   scheduler: Optional[Scheduler] = None,
+                  router: Optional["DecoderRouter"] = None,
+                  deadline_policy: Optional["DeadlinePolicy"] = None,
+                  decode_idle_rounds: bool = False,
                   device: Optional[DeviceModel] = None,
+                  make_cluster: Optional[Callable] = None,
+                  planner: Optional["ExecutionPlanner"] = None,
                   make_chip: Optional[Callable] = None,
                   make_metrics: Optional[Callable] = None,
                   code: Optional[CodeModel] = None,
@@ -79,15 +86,24 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     # Every part is a swap point: pass your own, or get the config-built default.
     if device is None:        device = TimingOnlyDevice()
     if decoder is None:       decoder = cfg.make_decoder(code)
-    if controller is None:    controller = cfg.make_controller(engine)
+    if make_controller is not None:    controller = make_controller(engine)   # engine-dependent swap
+    elif controller is None:           controller = cfg.make_controller(engine)
     if make_orchestrator is not None:  orchestrator = make_orchestrator(engine)   # engine-dependent swap
     elif orchestrator is None:         orchestrator = PauliFrameOrchestrator(engine)
     if scheduler is None:     scheduler = FifoScheduler()
 
-    cluster = DecoderCluster(engine, decoder, scheduler, controller, orchestrator,
-                             num_units=num_units, rounds_per_op=rounds_per_op, code=code,
-                             scheme=scheme, layout=layout, decoders=decoders,
-                             rounds_policy=rounds_policy)
+    # WORKLOAD-MANAGER seam: the default DecoderCluster, or a custom manager via
+    # make_cluster(engine, decoder, scheduler, controller, orchestrator). A custom manager
+    # must satisfy the WorkloadManager protocol (protocols.py); if it does not expose the
+    # scheme/layout/rounds_policy attributes the default planner reads, pass planner= too.
+    if make_cluster is not None:
+        cluster = make_cluster(engine, decoder, scheduler, controller, orchestrator)
+    else:
+        cluster = DecoderCluster(engine, decoder, scheduler, controller, orchestrator,
+                                 num_units=num_units, rounds_per_op=rounds_per_op, code=code,
+                                 scheme=scheme, layout=layout, decoders=decoders,
+                                 rounds_policy=rounds_policy, router=router,
+                                 deadline_policy=deadline_policy)
 
     # FACTORY seam: an explicit factory, or a make_factory(engine, cluster) hook for
     # factories that must route their correction decodes through THIS cluster (the
@@ -106,7 +122,7 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     else:
         chip = Chip(engine, device, controller, cluster, factory,
                     round_ticks=us(round_us), rounds_per_op=rounds_per_op,
-                    code_distance=code.distance)
+                    code_distance=code.distance, decode_idle_rounds=decode_idle_rounds)
     # Dependency inversion: the cluster gets only the callbacks it needs, not the chip object.
     orchestrator.connect(controller, chip.on_decision)  # orchestrator owns the conditional return path
     cluster.on_workload_complete = factory.shutdown    # lifecycle: stop the factory when done
@@ -125,7 +141,10 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     # into an execution plan -- the decoding windows, job sequence, and dependency graph -- and
     # hand it to the decoder cluster's workload manager AHEAD OF TIME (0 simulated ticks, off the
     # reaction path). The cluster then only runs the queue against this plan at runtime.
-    planner = WindowPlanner(cluster.scheme, cluster.layout, cluster.rounds_policy)
+    # PLANNER seam: pass planner=<ExecutionPlanner> to swap the planning algorithm; the
+    # default WindowPlanner is built from the cluster's own scheme/layout/rounds policy.
+    if planner is None:
+        planner = WindowPlanner(cluster.scheme, cluster.layout, cluster.rounds_policy)
     for op in ops:
         cluster.register_op(op)
     plan = planner.plan(ops)
@@ -135,21 +154,27 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     chip.load(ops)
     engine.run()
 
-    # ---- summary ----
+    # ---- summary (printed only when verbose, like the trace itself) ----
     chip_done = chip.last_finish_time
     last_event = engine.now
-    print("-" * 78)
-    print(f"SUMMARY ({num_units} decoder unit(s)):")
-    print(f"  chip finished all physical work : {fmt(chip_done)}")
-    print(f"  decoder fully finished          : {fmt(last_event)}")
-    print(f"  reaction tail (chip->fully done): {fmt(last_event - chip_done)}")
-    peak_q = max((q for _, q in cluster.queue_log), default=0)
-    print(f"  peak ready-queue length         : {peak_q}")
-    if isinstance(factory, DistillationFactory):
-        print(f"  magic states produced           : {factory.produced}")
-        print(f"  peak magic states in storage    : {factory.peak_in_flight}")
-        print(f"  total magic-state supply stall  : {fmt(factory.total_stall)}")
-    print()
+    if verbose:
+        print("-" * 78)
+        print(f"SUMMARY ({num_units} decoder unit(s)):")
+        print(f"  chip finished all physical work : {fmt(chip_done)}")
+        print(f"  decoder fully finished          : {fmt(last_event)}")
+        print(f"  reaction tail (chip->fully done): {fmt(last_event - chip_done)}")
+        peak_q = max((q for _, q in getattr(cluster, "queue_log", [])), default=0)
+        print(f"  peak ready-queue length         : {peak_q}")
+        # the decoder-cluster syndrome RAM high-water (a headline storage cost of the
+        # cluster in arXiv:2511.10633 Sec III), in retained payloads
+        print(f"  peak syndrome RAM (payloads)    : {getattr(cluster, 'peak_payloads', 0)}")
+        # factory stats, duck-typed: any factory exposing the scalar counters gets the
+        # lines (a custom factory without them simply prints nothing extra).
+        if isinstance(getattr(factory, "produced", None), int):
+            print(f"  magic states produced           : {factory.produced}")
+            print(f"  peak magic states in storage    : {factory.peak_in_flight}")
+            print(f"  total magic-state supply stall  : {fmt(factory.total_stall)}")
+        print()
     return {"engine": engine, "cluster": cluster, "factory": factory, "chip": chip,
             "orchestrator": orchestrator, "controller": controller,
             "chip_done": chip_done, "fully_done": last_event,
