@@ -112,10 +112,16 @@ class ModularController:
                                  label="controller->chip")
         self.engine.schedule(self.t_oc, at_controller, label="orchestrator->controller")
 
+    # TODO(link model): these two constants are decoder-side links the controller is not
+    # physically on; they live here so all six Table-2 numbers form one price list. When
+    # the decoder-switching study activates, decide whether they -- plus a weak<->strong
+    # handoff channel, possibly size-aware (latency = fixed + bits/bandwidth, using the
+    # Table-2 payload sizes: ~100 bits boundary, ~5000 bits/round) -- should move to a
+    # dedicated LinkModel seam consulted by both controller and cluster.
     def dec_to_dec_delay(self) -> int:
         """Decoder-to-decoder boundary-message latency (ticks)."""
         return self.t_dd                        # artificial-defect handoff between windows
-    
+
     def dec_to_orch_delay(self) -> int:
         """Decoder-to-orchestrator message latency (ticks)."""
         return self.t_do                        # decoders -> orchestrator

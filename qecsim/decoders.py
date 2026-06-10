@@ -138,6 +138,11 @@ class SwitchingDecoder:
         self.rng = random.Random(seed)
         self.switches = 0                      # diagnostic: how many jobs escalated
 
+    # TODO(switching): add the threshold trigger -- sample a soft output g per job from a
+    # configurable distribution and switch iff g < g_th, so g_th becomes a real sweep axis
+    # matching arXiv:2510.25222 (gamma_switch stays as the flat-probability default). Also
+    # add an optional T_comm_weak charged on EVERY decode -- the paper prices weak-path
+    # communication too (its backlog recursion Eq. 12 has both T_comm^weak and T_comm^strong).
     def latency(self, job: DecodeJob) -> int:
         """Weak latency, plus (with probability gamma_switch) handoffs + strong latency."""
         lat = self.weak.latency(job)

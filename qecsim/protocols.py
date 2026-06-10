@@ -166,7 +166,7 @@ class DecoderService(Protocol):
 class WorkloadManager(DecoderService, Protocol):
     """The decoder-cluster seam: the paper's "workload manager" (arXiv:2511.10633 Sec III)
     as the chip and the wiring see it. This is the EXPLICIT contract a custom cluster must
-    satisfy (it was previously implicit in DecoderCluster):
+    satisfy:
       - register_op / build_windows / load_execution_plan: install the workload,
       - rounds_for: the agreed temporal length of each operation (chip cadence reads it),
       - on_syndrome_arrival / on_memory_round: the controller's delivery targets,

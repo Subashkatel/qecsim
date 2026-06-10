@@ -129,7 +129,9 @@ class ParallelWindowScheme(SlidingWindowScheme):
                 w.deps.append((w.op_id, k + 1))            # A on the right (absent for tail)
 
 
-# TODO: currently just a stub -- documents how decoder switching's windowing works; see docstring to finish it.
+# TODO: currently just a stub -- documents how decoder switching's windowing works; see the
+# docstring recipe to finish it (plan_windows + the cluster escalation branch + the resume rule),
+# then add acceptance tests for the paper's Eq. 15 constraint and Theorem 1 stability boundary.
 class DoubleWindowScheme:
     """STUB. The double-window scheme of decoder switching (arXiv:2510.25222 Sec III.3).
 

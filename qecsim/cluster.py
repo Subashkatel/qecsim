@@ -399,6 +399,12 @@ class DecoderCluster:
             self._try_dispatch()
             return
         # ---- an operation window ----
+        # TODO(double-window escalation): when DoubleWindowScheme lands, the branch goes
+        # here -- if the scheme is double-window and result.soft_output < g_th: do NOT
+        # commit; re-enqueue a job covering r_strong = r_com + 2*r_buf rounds with
+        # attempt += 1, hint="strong" (the router sends it to the strong decoder),
+        # boundaries pinned from the weak results, the weak->strong shipment charged, and
+        # the strong result commits the region (arXiv:2510.25222 Sec III.3).
         key = (job.op_id, job.window_id)
         w = self.windows[key]
         op_id = job.op_id
