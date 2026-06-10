@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 from .config import us
 from .engine import Engine
+from .links import LinkModel
 from .message import SyndromePayload, Decision
 # ================================================================================
 # CONTROLLER
@@ -11,9 +12,8 @@ from .message import SyndromePayload, Decision
 # one controller manages ~10^4 physical qubits there). It sits on BOTH sides of the
 # reaction path: outbound it relays each round's syndromes chip -> controller (t_qc)
 # -> decoder cluster (t_cd); inbound it relays conditional instructions orchestrator
-# -> controller (t_oc) -> chip (t_cq). It also owns the two decoder-side link
-# constants: decoder->decoder boundary exchange (t_dd) and decoder->orchestrator
-# result delivery (t_do).
+# -> controller (t_oc) -> chip (t_cq). Link prices come from the LinkModel (links.py),
+# the fabric price list the wiring shares between this controller and the cluster.
 # ================================================================================
 
 class ModularController:
@@ -40,16 +40,14 @@ class ModularController:
 
     def __init__(self, engine: Engine, t_qc=us(0.15), t_cd=us(2.0), t_dd=us(0.5),
                  t_do=us(1.0), t_oc=us(4.0), t_cq=us(0.15), log_syndromes=True,
-                 t_pack=0):
-        """Store the six link latencies (constants from arXiv:2511.10633 Table 2) and
-        the per-packet packaging cost t_pack (ticks)."""
+                 t_pack=0, links: Optional[LinkModel] = None):
+        """Hold the communication fabric and the per-packet packaging cost t_pack
+        (ticks). The fabric is the given `links` (a LinkModel, usually the one the
+        wiring shares with the cluster); without one, a flat LinkModel is built from
+        the six scalar latencies (constants from arXiv:2511.10633 Table 2)."""
         self.engine = engine
-        self.t_qc = t_qc
-        self.t_cd = t_cd
-        self.t_dd = t_dd
-        self.t_do = t_do
-        self.t_oc = t_oc
-        self.t_cq = t_cq
+        self.links = links if links is not None \
+            else LinkModel(qc=t_qc, cd=t_cd, dd=t_dd, do=t_do, oc=t_oc, cq=t_cq)
         self.t_pack = t_pack
         self.log_syndromes = log_syndromes
         self._pending: dict = {}      # (op_id, round_index) -> [(payload, deliver), ...]
@@ -67,9 +65,10 @@ class ModularController:
                                     f"received round {payload.round_index} of "
                                     f"op#{payload.operation_id} from chip (t_qc); "
                                     f"forwarding to decoder (t_cd)")
-                self.engine.schedule(self.t_cd, lambda: deliver(payload),
+                self.engine.schedule(self.links.cd.cost(), lambda: deliver(payload),
                                      label="controller->decoder")
-            self.engine.schedule(self.t_qc, at_controller, label="chip->controller")
+            self.engine.schedule(self.links.qc.cost(), at_controller,
+                                 label="chip->controller")
             return
 
         def at_controller_fragment():
@@ -95,10 +94,11 @@ class ModularController:
                                 f"round {payload.round_index} of op#{payload.operation_id} "
                                 f"complete ({payload.n_fragments} fragments); packaging "
                                 f"and forwarding ONE packet to decoder (t_pack + t_cd)")
-            self.engine.schedule(self.t_pack + self.t_cd,
+            self.engine.schedule(self.t_pack + self.links.cd.cost(),
                                  lambda b=tuple(buf): [d(p) for p, d in b],
                                  label="controller->decoder packet")
-        self.engine.schedule(self.t_qc, at_controller_fragment, label="chip->controller")
+        self.engine.schedule(self.links.qc.cost(), at_controller_fragment,
+                             label="chip->controller")
 
     def relay_instruction(self, decision: "Decision",
                          deliver: Callable[["Decision"], None]) -> None:
@@ -108,20 +108,7 @@ class ModularController:
             self.engine.log("Controller",
                             f"received instruction for op#{decision.gadget_id} from "
                             f"orchestrator (t_oc); forwarding to chip (t_cq)")
-            self.engine.schedule(self.t_cq, lambda: deliver(decision),
+            self.engine.schedule(self.links.cq.cost(), lambda: deliver(decision),
                                  label="controller->chip")
-        self.engine.schedule(self.t_oc, at_controller, label="orchestrator->controller")
-
-    # TODO(link model): these two constants are decoder-side links the controller is not
-    # physically on; they live here so all six Table-2 numbers form one price list. When
-    # the decoder-switching study activates, decide whether they -- plus a weak<->strong
-    # handoff channel, possibly size-aware (latency = fixed + bits/bandwidth, using the
-    # Table-2 payload sizes: ~100 bits boundary, ~5000 bits/round) -- should move to a
-    # dedicated LinkModel seam consulted by both controller and cluster.
-    def dec_to_dec_delay(self) -> int:
-        """Decoder-to-decoder boundary-message latency (ticks)."""
-        return self.t_dd                        # artificial-defect handoff between windows
-
-    def dec_to_orch_delay(self) -> int:
-        """Decoder-to-orchestrator message latency (ticks)."""
-        return self.t_do                        # decoders -> orchestrator
+        self.engine.schedule(self.links.oc.cost(), at_controller,
+                             label="orchestrator->controller")
