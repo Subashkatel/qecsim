@@ -12,7 +12,10 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 from qecsim import (build_and_run, three_cnot_circuit, cnot_plus_two_t_circuit,
                     independent_t_circuit, PresetLatencyDecoder, RelayBPDecoder,
-                    DistillationFactory, DecoderUtilization, ReadyQueueStats, us)
+                    DistillationFactory, DecoderUtilization, ReadyQueueStats, us,
+                    ParallelWindowScheme, WindowLatencyBreakdown)
+from qecsim.frontends.circuit import CircuitFrontend
+from qecsim.message import Operation
 
 D, RPO = 3, 11
 
@@ -49,8 +52,24 @@ def example4():
                           for k, v in r["metrics"].items()})
 
 
+def example5():
+    """Windowing study: sequential vs parallel A/B (arXiv:2511.10633 Sec II.4) on a
+    memory stream, with the per-stage latency breakdown showing WHERE the time goes."""
+    mem = CircuitFrontend([Operation(0, "M(q0)", (0,), clifford=True)]).build()
+    for name, scheme in (("sequential", None), ("parallel A/B", ParallelWindowScheme())):
+        r = build_and_run(mem, num_units=4, d=D, rounds_per_op=63,
+                          decoder=PresetLatencyDecoder(10.0), scheme=scheme,
+                          make_metrics=lambda e, cl, ch, f: [WindowLatencyBreakdown(cl)],
+                          verbose=False,
+                          title=f"5) WINDOWING STUDY -- {name}, 4 units, slow decoder")
+        stages = r["metrics"]["window_latency"]
+        print("   per-window stage means (us): " +
+              ", ".join(f"{s}={stages[s]['mean'] / 1e6:.2f}"
+                        for s in ("buffer_fill", "dep_block", "queue_wait", "service")))
+
+
 # example number -> function. Add a new example by registering it here.
-EXAMPLES = {1: example1, 2: example2, 3: example3, 4: example4}
+EXAMPLES = {1: example1, 2: example2, 3: example3, 4: example4, 5: example5}
 
 
 def main(argv):
