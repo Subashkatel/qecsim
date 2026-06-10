@@ -45,8 +45,9 @@ class Chip:
         # (they contribute decoder load and storage error). When True, every commit_rounds()
         # idle rounds the chip submits one memory-window decode job through the SAME
         # DecoderService path the factory uses, so reaction-time waits load the cluster.
-        # Stage-1 limitation (see docs/DESIGN.md Sec 5): these ad-hoc memory jobs do not
-        # exchange boundaries with each other.
+        # Known limitation: these ad-hoc memory jobs do not exchange boundaries with
+        # each other (the faithful version would plan real scheme windows for the idle
+        # period).
         self.decode_idle_rounds = decode_idle_rounds
  
         self.ops: dict[int, Operation] = {}
