@@ -10,10 +10,13 @@ from .codes import SurfaceCodeModel
 from .schemes import SlidingWindowScheme
 from .planner import WindowPlanner, FixedRounds
 from .layouts import UniformLayout
+from .decoders import CodeRouter
+from .schedulers import EnqueueTimeDeadline
  
 if TYPE_CHECKING:                      # type-only; these collaborators are handed to __init__
     from .protocols import (Decoder, Scheduler, Controller, Orchestrator,
-                            CodeModel, DecodingScheme, LayoutModel, RoundsPolicy)
+                            CodeModel, DecodingScheme, LayoutModel, RoundsPolicy,
+                            DecoderRouter, DeadlinePolicy)
 # ========================================================================================
 # CLUSTER
 # This module defines the decoder cluster -- the paper's decoder cluster with its
@@ -22,8 +25,8 @@ if TYPE_CHECKING:                      # type-only; these collaborators are hand
 # prior decoding windows" (arXiv:2511.10633 Sec III) -- the main piece of the decoding side.
 # It receives the WindowPlan from the orchestrator's planner ahead of time (load_execution_plan),
 # runs the queue against it, exchanges committed window boundaries between decoders (the t_dd hop),
-# and DELIVERS each finished operation result to the orchestrator (the t_do hop) where, after
-# the sending the decode, the ORCHESTRATOR owns sending any conditional instruction back to the chip.
+# and DELIVERS each finished operation result to the orchestrator (the t_do hop); the
+# ORCHESTRATOR then owns sending any conditional instruction back to the chip.
 # The cluster never reaches into the chip or factory (dependency inversion); it only fires the
 # lifecycle callback `on_workload_complete` the wiring installs.
 # ========================================================================================
@@ -44,17 +47,31 @@ class DecoderCluster:
                  scheme: Optional[DecodingScheme] = None,
                  layout: Optional[LayoutModel] = None,
                  decoders: Optional[dict] = None,
-                 rounds_policy: Optional[RoundsPolicy] = None):
+                 rounds_policy: Optional[RoundsPolicy] = None,
+                 router: Optional["DecoderRouter"] = None,
+                 deadline_policy: Optional["DeadlinePolicy"] = None):
         """Set up the cluster: decoder units, ready queue, syndrome buffer, bookkeeping."""
         self.engine = engine
         self.decoder = decoder
         # G1 -- HETEROGENEOUS PER-CODE DECODING. `decoder` is the DEFAULT decoder, used for any
         # job whose code is not in `decoders`. `decoders` is an optional {code_name: Decoder}
         # map so each code can be decoded by its own algorithm (surface by MWPM, BB by Relay-BP,
-        # ...). A job carries its code on DecodeJob.code; _decoder_for(code) picks the right one.
+        # ...). A job carries its code on DecodeJob.code; the ROUTER picks the right one.
         # With no map (the common single-code case) every job routes to `decoder`, so behaviour
         # is byte-identical to before this seam existed.
         self.decoders = dict(decoders) if decoders else {}
+        # ROUTING seam: a DecoderRouter picks the decoder PER JOB. The default CodeRouter
+        # reproduces the per-code map above; a custom router can route by job.hint/attempt
+        # instead -- the seam decoder switching needs (arXiv:2510.25222), and the way to mix
+        # decoding devices with different speeds (FPGA/ASIC/GPU latency models) in one cluster.
+        self.router = router if router is not None \
+            else CodeRouter(default=decoder, by_code=self.decoders)
+        # DEADLINE seam: assigns each window job its deadline at enqueue time. The default
+        # (enqueue time) makes EarliestDeadlineScheduler behave like FIFO, as before; pass
+        # ReactionPathDeadline to prioritize windows whose result gates a waiting non-Clifford
+        # gate (the reaction path of arXiv:2511.10633).
+        self.deadline_policy = deadline_policy if deadline_policy is not None \
+            else EnqueueTimeDeadline()
         self.scheduler = scheduler
         self.controller = controller
         self.orchestrator = orchestrator
@@ -97,12 +114,14 @@ class DecoderCluster:
         self.memory_rounds: dict[int, int] = {}    # idle memory rounds (gated successors)
         # REAL syndrome buffer: arriving payloads are retained here (the decoder-cluster RAM
         # of arXiv:2511.10633 Sec III) until their window decodes, then assembled into the
-        # decode job. Keyed [op_id][round_index] -> SyndromePayload. In timing-only mode the
-        # payloads carry no bits, but the plumbing is identical, so a real decoder needs no
-        # cluster change -- only a real DeviceModel + Decoder.
-        self.payload_store: dict[int, dict[int, SyndromePayload]] = {}
-        self.peak_payloads = 0                     # peak retained payloads (storage high-water)
-        self.num_ops = 0
+        # decode job. Keyed [op_id][round_index][patch_id] -> SyndromePayload: a round may
+        # arrive as several per-patch FRAGMENTS (SyndromePayload.n_fragments) when the
+        # device emits per-patch payloads; the single-payload default stores one fragment
+        # per round, identical to before. In timing-only mode the payloads carry no bits,
+        # but the plumbing is identical, so a real decoder needs no cluster change -- only
+        # a real DeviceModel + Decoder.
+        self.payload_store: dict[int, dict[int, dict]] = {}
+        self.peak_payloads = 0                     # peak retained payloads (storage high-water; surfaced in the wiring summary)
  
         # the sliding-window plan (built once all ops are loaded)
         self.windows: dict[tuple, Window] = {}
@@ -110,6 +129,8 @@ class DecoderCluster:
         self.nwin: dict[int, int] = {}
         self.successors: dict[int, list] = {}
         self.committed_windows: set = set()
+        self._committed_per_op: dict[int, int] = {}   # committed-window count per op
+        self._gating_ops: set[int] = set()            # ops whose result gates a successor
         self.op_results: dict[int, int] = {}      # accumulated logical value per op (real decoders)
         self.total_windows = 0
         self._windows_built = False
@@ -135,12 +156,16 @@ class DecoderCluster:
             self.memory_rounds[op.id] = 0
             self.payload_store[op.id] = {}
         self.ops[op.id] = op
-        self.num_ops = len(self.ops)
+        if op.gated_by is not None:
+            # the GATING op's decode result releases this op: its windows sit on the
+            # reaction path (used by the DeadlinePolicy to prioritize them).
+            self._gating_ops.add(op.gated_by)
 
-    def _decoder_for(self, code: Optional[str]) -> "Decoder":
-        """Pick the decoder for a job's code (G1). Falls back to the default `decoder` when the
-        code has no dedicated entry -- so a single-code run always uses the one default decoder."""
-        return self.decoders.get(code, self.decoder)
+    def _decoder_for(self, job: DecodeJob) -> "Decoder":
+        """Pick the decoder for a job via the ROUTER. The default CodeRouter routes by
+        job.code (G1) and falls back to the default `decoder`; a custom DecoderRouter can
+        route by job.hint/attempt instead (decoder switching, heterogeneous device pools)."""
+        return self.router.route(job)
  
     def rounds_for(self, op: Operation) -> int:
         """Rounds this operation runs for, via the ROUNDS policy under the op's own code (D1).
@@ -195,11 +220,21 @@ class DecoderCluster:
     def on_syndrome_arrival(self, payload: SyndromePayload) -> None:
         """A syndrome round arrived: buffer it and re-check which windows can now decode."""
         op = self.ops[payload.operation_id]
-        self.rounds_arrived[op.id] = max(self.rounds_arrived[op.id], payload.round_index)
-        # retain the payload in the cluster's syndrome buffer until its window decodes
-        self.payload_store[op.id][payload.round_index] = payload
+        # retain the payload in the cluster's syndrome buffer until its window decodes.
+        # A round counts as ARRIVED only once all its fragments are in. With the standard
+        # ModularController this is trivially true on the last delivery (the CONTROLLER
+        # aggregates a round's fragments and ships them as one atomic packet, per
+        # arXiv:2511.10633 Sec III.1); the count here is the receiving-side completeness
+        # BACKSTOP for custom controllers that forward fragments individually -- a window
+        # must never be assembled from half a round.
+        fragments = self.payload_store[op.id].setdefault(payload.round_index, {})
+        fragments[payload.patch_id] = payload
+        if len(fragments) >= payload.n_fragments:
+            self.rounds_arrived[op.id] = max(self.rounds_arrived[op.id],
+                                             payload.round_index)
         self.peak_payloads = max(self.peak_payloads,
-                                 sum(len(s) for s in self.payload_store.values()))
+                                 sum(len(frags) for s in self.payload_store.values()
+                                     for frags in s.values()))
         self.engine.log("DecoderClstr",
                         f"round {payload.round_index} of {op.name} arrived "
                         f"(op now has rounds 1..{self.rounds_arrived[op.id]})")
@@ -219,19 +254,58 @@ class DecoderCluster:
         for k in range(self.nwin[op_id]):
             self._check_window((op_id, k))
  
+    @staticmethod
+    def _xor_mask(prev, mask) -> list:
+        """Elementwise XOR of two bit sequences (zero-padded to the longer one)."""
+        a = [int(b) for b in prev] if prev is not None else []
+        b = [int(b) for b in mask]
+        if len(a) < len(b):
+            a += [0] * (len(b) - len(a))
+        for i, bit in enumerate(b):
+            a[i] ^= bit
+        return a
+
+    def _apply_boundary(self, w: Window, payload: SyndromePayload,
+                        round_key: Optional[int] = None) -> SyndromePayload:
+        """Fold this window's received ARTIFICIAL DEFECTS into one payload: the next
+        window "includes the artificial defects along with the unresolved defects from
+        the buffer region" (arXiv:2209.08552 Sec I.B). The XOR happens on a COPY -- the
+        shared payload store is never mutated, since overlapping windows read the same
+        rounds. A timing-only payload (bits=None) becomes the defect mask itself.
+        `round_key` overrides the lookup round (used for successor-overflow payloads,
+        whose own round numbering starts at 1 but whose defects are keyed past this
+        op's last round)."""
+        r = payload.round_index if round_key is None else round_key
+        mask = w.boundary_in.get((r, payload.patch_id), w.boundary_in.get(r))
+        if mask is None:
+            return payload
+        from dataclasses import replace
+        bits = [int(m) for m in mask] if payload.bits is None \
+            else self._xor_mask(payload.bits, mask)
+        return replace(payload, bits=bits)
+
     def _assemble_payloads(self, w: Window) -> list:
         """Collect retained payloads for this window's commit+buffer rounds (plus the
-        successor-operation overflow rounds), so a real decoder receives the actual data.
+        successor-operation overflow rounds), so a real decoder receives the actual data --
+        with any received artificial defects XORed in (per-round, patch-sorted fragments).
         Timing-only payloads carry no bits, but the assembly path is identical."""
         op_store = self.payload_store.get(w.op_id, {})
         R_op = self.rounds_for(self.ops[w.op_id])      # this operation's own length (D1)
         hi = min(w.buffer_hi, R_op)
-        out = [op_store[r] for r in range(w.commit_lo, hi + 1) if r in op_store]
+        out = []
+        for r in range(w.start_round, hi + 1):
+            if r in op_store:
+                out += [self._apply_boundary(w, op_store[r][p])
+                        for p in sorted(op_store[r])]
         overflow = w.buffer_hi - R_op
         if overflow > 0:
             for s in self.successors.get(w.op_id, []):
                 succ = self.payload_store.get(s, {})
-                out += [succ[r] for r in range(1, overflow + 1) if r in succ]
+                for r in range(1, overflow + 1):
+                    if r in succ:
+                        # defects aimed at these rounds are keyed past this op's end
+                        out += [self._apply_boundary(w, succ[r][p], round_key=R_op + r)
+                                for p in sorted(succ[r])]
         return out
  
     def _window_data_complete(self, w: Window) -> bool:
@@ -249,8 +323,12 @@ class DecoderCluster:
         w = self.windows[key]
         if w.queued or w.committed:
             return
+        if w.t_first_round is None and self.rounds_arrived[w.op_id] >= w.start_round:
+            w.t_first_round = self.engine.now            # its first round just arrived
         if not self._window_data_complete(w):
             return
+        if w.t_data_complete is None:
+            w.t_data_complete = self.engine.now          # commit+buffer rounds all present
         op = self.ops[w.op_id]
         if w.deps_remaining > 0:
             if not w.blocked_logged:
@@ -260,14 +338,17 @@ class DecoderCluster:
                                 f"has all its data, but is WAITING for the boundary from "
                                 f"{w.deps_remaining} predecessor window(s)")
             return
-        # NOTE: deadline is currently just the enqueue time, so EarliestDeadlineScheduler
-        # degenerates to FIFO for window jobs. A real deadline would come from the plan
-        # (e.g. when this window's result gates the reaction path); see docs/README.md.
+        w.t_queued = self.engine.now                     # data AND deps met -> ready queue
+        # the DEADLINE policy decides this job's urgency; windows of an op whose result
+        # gates a waiting non-Clifford gate are on the reaction path (arXiv:2511.10633).
+        deadline = self.deadline_policy.deadline(
+            op, w, self.engine.now, on_reaction_path=(op.id in self._gating_ops))
         job = DecodeJob(op_id=w.op_id, window_id=w.k, n_rounds=w.n_rounds,
-                        ready_time=self.engine.now, deadline=self.engine.now,
+                        ready_time=self.engine.now, deadline=deadline,
                         spatial_nodes=self._spatial_nodes(op),
                         payloads=self._assemble_payloads(w),
                         code=self.layout.code_for_op(op).name,   # G1: route to this code's decoder
+                        window=w,                                # commit geometry for boundary defects
                         label=f"{op.name} W{w.k}[commit {w.commit_lo}-{w.commit_hi}]")
         self.scheduler.insert(self.ready, job)
         w.queued = True
@@ -279,14 +360,18 @@ class DecoderCluster:
  
     def submit_decode(self, n_rounds: int, on_done: Callable[[], None],
                       label: str = "external", deadline: Optional[int] = None,
-                      code: Optional[str] = None) -> None:
+                      code: Optional[str] = None,
+                      spatial_nodes: Optional[int] = None) -> None:
         """DecodeService entry point: submit a self-contained decode job that competes for
-        the SAME decoder units as the core (used by the magic state factory). `code` (optional)
-        routes the job to that code's decoder; None uses the cluster's default decoder (G1)."""
+        the SAME decoder units as the core (used by the magic state factory and by the
+        chip's idle-round memory decoding). `code` (optional) routes the job to that code's
+        decoder; None uses the cluster's default decoder (G1). `spatial_nodes` (optional)
+        sizes the decoding graph for latency models; None lets the decoder use its default."""
         job = DecodeJob(op_id=-1, window_id=0, n_rounds=n_rounds,
                         ready_time=self.engine.now,
                         deadline=self.engine.now if deadline is None else deadline,
-                        on_done=on_done, label=label, code=code)
+                        on_done=on_done, label=label, code=code,
+                        spatial_nodes=spatial_nodes)
         self.scheduler.insert(self.ready, job)
         self.queue_log.append((self.engine.now, len(self.ready)))
         self._try_dispatch()
@@ -296,7 +381,9 @@ class DecoderCluster:
         while self.free_units > 0 and self.ready:
             job = self.scheduler.pop(self.ready)
             self.free_units -= 1
-            lat = self._decoder_for(job.code).latency(job)   # G1: per-code decoder
+            if job.op_id >= 0:                               # window job: stamp dispatch
+                self.windows[(job.op_id, job.window_id)].t_dispatch = self.engine.now
+            lat = self._decoder_for(job).latency(job)        # routed decoder (G1 / per-job)
             waited = self.engine.now - job.ready_time
             self.engine.log("DecoderClstr",
                             f"START DECODE {job.label} (waited {fmt(waited).strip()} in queue, "
@@ -320,29 +407,42 @@ class DecoderCluster:
         op_id = job.op_id
         op = self.ops[op_id]
         w.committed = True
+        w.t_done = self.engine.now
         self.committed_windows.add(key)
+        self._committed_per_op[op_id] = self._committed_per_op.get(op_id, 0) + 1
         self.engine.log("DecoderClstr",
                         f"DECODE DONE {op.name} W{w.k}: rounds {w.commit_lo}-{w.commit_hi} "
                         f"committed (units free now {self.free_units})")
-        # A committed window passes its boundary information to the next window's decoder.
-        # This is a decoder->decoder exchange: SENT now, ARRIVES one t_dd hop later.
+        # run the actual decode and KEEP its result. For a real decoder this is a genuine
+        # logical value; for a timing-only stub it is None and the orchestrator falls back
+        # to its toy outcome. Per-operation windows are combined (parity) into one outcome.
+        # Decoded BEFORE the boundary send below, because the result may carry the
+        # ARTIFICIAL DEFECTS the dependent windows need (decode itself emits no events,
+        # so the trace order is unchanged).
+        res = self._decoder_for(job).decode(job)             # routed decoder (G1 / per-job)
+        if res is not None and res.logical_value is not None:
+            self.op_results[op_id] = self.op_results.get(op_id, 0) ^ int(res.logical_value)
+        defects = res.boundary_defects if res is not None else None
+        # A committed window passes its boundary information to the next window's decoder:
+        # the artificial defects created where committed correction chains crossed out of
+        # the commit region (arXiv:2209.08552 Fig. 2). This is a decoder->decoder exchange:
+        # SENT now, ARRIVES one t_dd hop later. Timing-only decoders send no data (None) --
+        # the hop still clears the dependency, exactly as before.
         for dep_key in w.dependents:
             dst = self.ops[dep_key[0]]
             self.engine.log("DecoderClstr",
                             f"decoder->decoder SEND: {op.name} W{w.k} -> {dst.name} "
                             f"W{dep_key[1]}  (boundary/artificial defects, arrives in t_dd)")
             self.engine.schedule(self.controller.dec_to_dec_delay(),
-                                 lambda dk=dep_key, sn=op.name, sk=w.k:
-                                     self._receive_boundary(dk, sn, sk),
+                                 lambda dk=dep_key, sn=op.name, sk=w.k, so=op_id, bd=defects:
+                                     self._receive_boundary(dk, sn, sk, so, bd),
                                  label=f"defects {op.name}W{w.k}->{dst.name}W{dep_key[1]}")
-        # run the actual decode and KEEP its result. For a real decoder this is a genuine
-        # logical value; for a timing-only stub it is None and the orchestrator falls back
-        # to its toy outcome. Per-operation windows are combined (parity) into one outcome.
-        res = self._decoder_for(job.code).decode(job)        # G1: per-code decoder
-        if res is not None and res.logical_value is not None:
-            self.op_results[op_id] = self.op_results.get(op_id, 0) ^ int(res.logical_value)
-        # the operation's logical outcome is known when its LAST window commits -> orchestrator
-        if w.k == self.nwin[op_id] - 1:
+        # the operation's logical outcome is known when ALL its windows have committed ->
+        # orchestrator. (Not "when window k = nwin-1 commits": only a sequential chain
+        # guarantees that window finishes last; the parallel A/B scheme's windows commit
+        # out of order under contention.) For the sequential default this fires at the
+        # exact same event as before.
+        if self._committed_per_op[op_id] == self.nwin[op_id]:
             self.engine.schedule(self.controller.dec_to_orch_delay(),
                                  lambda: self._deliver_to_orchestrator(op),
                                  label=f"result->orch({op.name})")
@@ -360,10 +460,30 @@ class DecoderCluster:
         if len(self.committed_windows) == self.total_windows and self.on_workload_complete is not None:
             self.on_workload_complete()
  
-    def _receive_boundary(self, key: tuple, src_name: str, src_k: int) -> None:
-        """A neighbor window's boundary arrived; clear one dependency and re-check."""
+    def _store_boundary(self, w: Window, src_op_id: int, defects: Optional[dict]) -> None:
+        """File a committed window's artificial defects on the dependent window, keyed in
+        the DEPENDENT op's round numbering: a cross-op boundary (predecessor's exit window
+        -> successor's entry window) shifts rounds by the predecessor's length, so defects
+        past its last round land on the successor's first rounds. Masks for the same node
+        XOR-merge (defects are mod-2 syndrome flips)."""
+        if not defects:
+            return
+        shift = 0 if src_op_id == w.op_id else -self.rounds_for(self.ops[src_op_id])
+        for key, mask in defects.items():
+            r, patch = key if isinstance(key, tuple) else (key, None)
+            r += shift
+            if r < 1:
+                continue                       # refers to the predecessor's own rounds
+            dst_key = (r, patch) if patch is not None else r
+            w.boundary_in[dst_key] = self._xor_mask(w.boundary_in.get(dst_key), mask)
+
+    def _receive_boundary(self, key: tuple, src_name: str, src_k: int,
+                          src_op_id: int, defects: Optional[dict] = None) -> None:
+        """A neighbor window's boundary arrived; file its artificial defects (if the
+        decoder produced any), clear one dependency and re-check."""
         w = self.windows[key]
         op = self.ops[w.op_id]
+        self._store_boundary(w, src_op_id, defects)
         w.deps_remaining -= 1
         still = f"; still waiting on {w.deps_remaining}" if w.deps_remaining > 0 else ""
         self.engine.log("DecoderClstr",
@@ -372,10 +492,11 @@ class DecoderCluster:
         self._check_window(key)
  
     def _deliver_to_orchestrator(self, op: Operation) -> None:
-        # The decoder -> orchestrator hop (t_do, ~1 us) is paid for EVERY decoded window,
-        # Clifford or not: the orchestrator always needs the result to update its frames.
-        # Carry the operation's real decoded logical value (None if the decoder was a
-        # timing-only stub, in which case the orchestrator uses its toy outcome).
+        # The decoder -> orchestrator hop (t_do, ~1 us) is paid once per OPERATION -- when
+        # its last window commits -- Clifford or not: the orchestrator always needs the
+        # result to update its frames. Carry the operation's real decoded logical value
+        # (None if the decoder was a timing-only stub, in which case the orchestrator uses
+        # its toy outcome).
         """Hand the op's decoded result to the orchestrator (the t_do hop) and stop. What happens
         next -- frame update, and DISPATCH of any conditional decision back to the chip
         (orchestrator -> controller -> chip) -- is the orchestrator's job, not the cluster's."""
