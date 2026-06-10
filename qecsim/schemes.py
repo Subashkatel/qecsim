@@ -155,7 +155,7 @@ class DoubleWindowScheme:
       2. The cluster's _on_decode_done branch: on result.soft_output < g_th, hold the
          window's commit, re-enqueue a DecodeJob covering r_strong rounds with
          attempt=1, hint="strong" (the DecoderRouter sends it to the strong decoder; the
-         handoff is a decoder->decoder message, so charge controller.dec_to_dec_delay()).
+         handoff is a weak->strong shipment, so charge the cluster's links.ws channel).
       3. data_complete of the NEXT window: require r_com + r_buf rounds beyond the
          escalated region (the resume rule above).
     Until then, use SwitchingDecoder (decoders.py) for timing-level switching studies --
