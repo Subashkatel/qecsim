@@ -46,7 +46,14 @@ class SimConfig:
     t_cq_us: float = 0.15  # controller -> chip latency (microseconds)
     t_pack_us: float = 0.0 # controller packaging cost per round packet (microseconds): the controller aggregates a round's fragments into one t_cd packet (arXiv:2511.10633 Sec III.1); this prices the serialization/compression step (0 = free, the paper folds it into t_cd)
 
-    # tau_d(N) = alpha * N^beta: Collision Cluster FPGA fit, arXiv:2511.10633 Table 3
+    # Decoder speed model tau_d(N) = alpha * N^beta (arXiv:2511.10633 Eq. 12): time to decode
+    # one round of a decoding graph with N nodes (N ~ d^2 for a distance-d patch).
+    #   alpha = the hardware's raw speed, in seconds (smaller = faster decoder)
+    #   beta  = how decode time grows with patch size (>1 = superlinear: doubling the
+    #           graph more than doubles the decode time)
+    # Defaults: the paper's Table 3 fit for the Collision Cluster decoder on FPGA. Other
+    # Table 3 fits to swap in: ASIC (5.53e-11, 1.34), AlphaQubit (4.8e-6, 0.503),
+    # PyMatching at p=0.1% (5.91e-9, 1.17).
     decoder_alpha: float = 2.85e-10
     decoder_beta: float = 1.2
 
