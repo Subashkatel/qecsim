@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
  
-if TYPE_CHECKING:                     
+if TYPE_CHECKING:
     from .engine import Engine
+    from .links import LinkModel
     from .protocols import CodeModel, Controller, Decoder
 
 #===============================================================================
@@ -72,14 +73,19 @@ class SimConfig:
         if self.decoder_alpha < 0 or self.decoder_beta < 0:
             raise ValueError("decoder_alpha and decoder_beta must be >= 0")
 
+    def make_links(self) -> "LinkModel":
+        """Build the communication fabric (links.py) from these link-latency knobs --
+        flat constants, arXiv:2511.10633 Table 2. Imported lazily so this module has no
+        import-time dependency on links.py (which imports `us` from here)."""
+        from .links import LinkModel
+        return LinkModel(qc=us(self.t_qc_us), cd=us(self.t_cd_us),
+                         dd=us(self.t_dd_us), do=us(self.t_do_us),
+                         oc=us(self.t_oc_us), cq=us(self.t_cq_us))
+
     def make_controller(self, engine: "Engine") -> "Controller":
-        """Build the modular controller from these link-latency knobs. Imported lazily so this
-        module has no import-time dependency on controllers.py (which imports `us` from here)."""
+        """Build the modular controller on a fabric from these knobs (lazy import, as above)."""
         from .controllers import ModularController
-        return ModularController(engine,
-                                 t_qc=us(self.t_qc_us), t_cd=us(self.t_cd_us),
-                                 t_dd=us(self.t_dd_us), t_do=us(self.t_do_us),
-                                 t_oc=us(self.t_oc_us), t_cq=us(self.t_cq_us),
+        return ModularController(engine, links=self.make_links(),
                                  t_pack=us(self.t_pack_us))
 
     def make_decoder(self, code: "CodeModel") -> "Decoder":
