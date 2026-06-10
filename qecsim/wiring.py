@@ -92,6 +92,14 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     elif orchestrator is None:         orchestrator = PauliFrameOrchestrator(engine)
     if scheduler is None:     scheduler = FifoScheduler()
 
+    # LINKS: one LinkModel (the fabric price list) is shared by the controller and the
+    # cluster, so the fabric cannot disagree with itself. A controller built above
+    # carries one; a custom controller without a .links attribute gets the config-built
+    # fabric for the cluster's two hops (dd, do).
+    links = getattr(controller, "links", None)
+    if links is None:
+        links = cfg.make_links()
+
     # WORKLOAD-MANAGER seam: the default DecoderCluster, or a custom manager via
     # make_cluster(engine, decoder, scheduler, controller, orchestrator). A custom manager
     # must satisfy the WorkloadManager protocol (protocols.py); if it does not expose the
@@ -103,7 +111,7 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
                                  num_units=num_units, rounds_per_op=rounds_per_op, code=code,
                                  scheme=scheme, layout=layout, decoders=decoders,
                                  rounds_policy=rounds_policy, router=router,
-                                 deadline_policy=deadline_policy)
+                                 deadline_policy=deadline_policy, links=links)
 
     # FACTORY seam: an explicit factory, or a make_factory(engine, cluster) hook for
     # factories that must route their correction decodes through THIS cluster (the
