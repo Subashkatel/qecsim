@@ -57,7 +57,98 @@ class ReadyQueueStats:
     def result(self) -> dict:
         """Peak and time-average ready-queue length."""
         return {"peak": self.peak, "time_avg": (self._area / self._t if self._t else 0.0)}
- 
+
+
+class WindowLatencyBreakdown:
+    """Per-window latency decomposition -- THE instrument for comparing windowing
+    strategies (sequential vs parallel A/B vs adaptive; cf. ADaPT arXiv:2605.01149's
+    window-size/cost tradeoffs, and the backlog signature of arXiv:2511.10633):
+
+        BUFFER-FILL (first round -> data complete)   how long rounds buffer before usable
+        DEP-BLOCK   (data complete -> queued)        waiting on predecessor boundaries
+        QUEUE-WAIT  (queued -> dispatched)           waiting for a free decoder unit
+        SERVICE     (dispatched -> done)             the decode itself
+
+    The cluster stamps Window timestamps at events it already handles, so observe() is a
+    no-op and registering this metric never changes the trace or the timing. result()
+    gives per-stage mean/max; rows() gives one record per window for plotting/CSV.
+    (Delivery to the orchestrator after the last window is the constant t_do hop and is
+    not per-window data.)"""
+    name = "window_latency"
+
+    def __init__(self, cluster):
+        """Hold the cluster whose windows carry the timestamps."""
+        self.cluster = cluster
+
+    def observe(self, engine: "Engine") -> None:
+        """Nothing to sample (event-driven; the cluster stamps the windows)."""
+        pass
+
+    def rows(self) -> list:
+        """One record per fully-decoded window: op, window index, and the four stages."""
+        out = []
+        for (op_id, k), w in sorted(self.cluster.windows.items()):
+            stamps = (w.t_first_round, w.t_data_complete, w.t_queued, w.t_dispatch, w.t_done)
+            if any(s is None for s in stamps):
+                continue                       # window never (fully) decoded
+            out.append({"op": op_id, "window": k,
+                        "buffer_fill": w.t_data_complete - w.t_first_round,
+                        "dep_block": w.t_queued - w.t_data_complete,
+                        "queue_wait": w.t_dispatch - w.t_queued,
+                        "service": w.t_done - w.t_dispatch,
+                        "total": w.t_done - w.t_first_round})
+        return out
+
+    def result(self) -> dict:
+        """Per-stage {mean, max, n} in ticks across all decoded windows."""
+        rows = self.rows()
+        stages = ("buffer_fill", "dep_block", "queue_wait", "service", "total")
+        if not rows:
+            return {s: {"mean": 0.0, "max": 0, "n": 0} for s in stages}
+        return {s: {"mean": sum(r[s] for r in rows) / len(rows),
+                    "max": max(r[s] for r in rows), "n": len(rows)} for s in stages}
+
+
+class MagicStateLatency:
+    """Production-side magic-state latency, from the factory's per-state StateTrace
+    records (DistillationFactory): how long a state takes under a given production
+    strategy x decoder strategy. Stages:
+
+        distill     (distill start -> physical done)   the 15-to-1 rounds themselves
+        corr_decode (physical done -> last corr done)  decoder-cluster coupling: queue
+                                                       wait + the parallel correction
+                                                       decodes (grows when the cluster is
+                                                       contended -- arXiv:2511.10633's
+                                                       reaction-time/factory coupling)
+        deliver     (corr done -> delivered)           return trip + buffer idle
+
+    Complements MagicStateStall (consumer-side wait). MultiLevelDistillationFactory's
+    states are fungible buffer counts -- use its per-level produced/failures counters
+    instead of this metric."""
+    name = "magic_state_latency"
+
+    def __init__(self, factory):
+        """Hold the factory whose traces we summarize."""
+        self.factory = factory
+
+    def observe(self, engine: "Engine") -> None:
+        """Nothing to sample (the factory stamps each state's StateTrace)."""
+        pass
+
+    def result(self) -> dict:
+        """Per-stage {mean, max, n} in ticks across all delivered states."""
+        traces = [t for t in getattr(self.factory, "traces", [])
+                  if t.t_delivered is not None and t.t_corr_done is not None]
+        stages = ("distill", "corr_decode", "deliver", "total")
+        if not traces:
+            return {s: {"mean": 0.0, "max": 0, "n": 0} for s in stages}
+        vals = {"distill": [t.t_phys_done - t.t_distill_start for t in traces],
+                "corr_decode": [t.t_corr_done - t.t_phys_done for t in traces],
+                "deliver": [t.t_delivered - t.t_corr_done for t in traces],
+                "total": [t.t_delivered - t.t_distill_start for t in traces]}
+        return {s: {"mean": sum(v) / len(v), "max": max(v), "n": len(v)}
+                for s, v in vals.items()}
+
 
 # ---- STUBS: templates to copy. Each documents how to finish it; not registered by default. ----
 # TODO: currently just a stub -- result() raises NotImplementedError; see docstring to finish it.
