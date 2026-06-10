@@ -7,6 +7,7 @@ from .engine import Engine
 from .message import Operation, SyndromePayload, DecodeJob, DecodeResult, Window, WindowPlan
  
 from .codes import SurfaceCodeModel
+from .links import LinkModel
 from .schemes import SlidingWindowScheme
 from .planner import WindowPlanner, FixedRounds
 from .layouts import UniformLayout
@@ -49,8 +50,11 @@ class DecoderCluster:
                  decoders: Optional[dict] = None,
                  rounds_policy: Optional[RoundsPolicy] = None,
                  router: Optional["DecoderRouter"] = None,
-                 deadline_policy: Optional["DeadlinePolicy"] = None):
-        """Set up the cluster: decoder units, ready queue, syndrome buffer, bookkeeping."""
+                 deadline_policy: Optional["DeadlinePolicy"] = None,
+                 links: Optional[LinkModel] = None):
+        """Set up the cluster: decoder units, ready queue, syndrome buffer, bookkeeping.
+        `controller` is accepted as part of the construction contract (the make_cluster
+        hook signature) but no longer read -- link prices come from `links`."""
         self.engine = engine
         self.decoder = decoder
         # G1 -- HETEROGENEOUS PER-CODE DECODING. `decoder` is the DEFAULT decoder, used for any
@@ -73,8 +77,12 @@ class DecoderCluster:
         self.deadline_policy = deadline_policy if deadline_policy is not None \
             else EnqueueTimeDeadline()
         self.scheduler = scheduler
-        self.controller = controller
         self.orchestrator = orchestrator
+        # LINKS: the fabric price list for the two hops the cluster pays (dd boundary
+        # messages, do result delivery). The wiring passes the SAME LinkModel it gave
+        # the controller, so the fabric has one source of truth; the default (a flat
+        # Table-2 LinkModel) covers direct construction in tests.
+        self.links = links if links is not None else LinkModel()
         self.num_units = num_units
         self.free_units = num_units
         # The QEC code is now a swappable model. Passing code_distance=d (back-compatible)
@@ -436,7 +444,7 @@ class DecoderCluster:
             self.engine.log("DecoderClstr",
                             f"decoder->decoder SEND: {op.name} W{w.k} -> {dst.name} "
                             f"W{dep_key[1]}  (boundary/artificial defects, arrives in t_dd)")
-            self.engine.schedule(self.controller.dec_to_dec_delay(),
+            self.engine.schedule(self.links.dd.cost(),
                                  lambda dk=dep_key, sn=op.name, sk=w.k, so=op_id, bd=defects:
                                      self._receive_boundary(dk, sn, sk, so, bd),
                                  label=f"defects {op.name}W{w.k}->{dst.name}W{dep_key[1]}")
@@ -446,7 +454,7 @@ class DecoderCluster:
         # out of order under contention.) For the sequential default this fires at the
         # exact same event as before.
         if self._committed_per_op[op_id] == self.nwin[op_id]:
-            self.engine.schedule(self.controller.dec_to_orch_delay(),
+            self.engine.schedule(self.links.do.cost(),
                                  lambda: self._deliver_to_orchestrator(op),
                                  label=f"result->orch({op.name})")
             # RELEASE this op's syndrome RAM now its last window has decoded (arXiv:2511.10633
