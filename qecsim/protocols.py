@@ -1,10 +1,13 @@
 from __future__ import annotations
-from typing import Any, Callable, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, runtime_checkable, TYPE_CHECKING
 from .message import (Operation, SyndromePayload, DecodeJob, Window, WindowPlan,
                       DecodeResult, Decision)
+
+if TYPE_CHECKING:                      # type-only; Metric.observe references the Engine
+    from .engine import Engine
 #=========================================================================
 # PROTOCOLS 
-# This module defines the abstract base classes for various differnt
+# This module defines the abstract base classes for various different
 # things making the whole system modular and swappable. For example,
 # we can have different decoding strategies that can be swapped in 
 # and out without changing the rest of the system. Or we can have 
@@ -20,9 +23,16 @@ class InputFrontend(Protocol):
 
 @runtime_checkable
 class DeviceModel(Protocol):
-    """ This will help us with emits syndromes rounds. The default emits
-    empty (timing only) payloads but round_payload returns one round's of 
-    SyndromePayloads with code-specific data for real decoders."""
+    """ The QPU-side syndrome source: round_payload returns one round's SyndromePayload.
+    The default device emits empty (timing-only) payloads; real devices fill in
+    code-specific detection bits for real decoders.
+
+    OPTIONAL extension hook (duck-typed; the chip falls back to round_payload):
+        round_payloads(op, round_index) -> list[SyndromePayload]
+    emits one payload PER PATCH for the round (each tagged with n_fragments by the chip)
+    -- the granularity patch-local decoding graphs and spatial lattice-surgery windows
+    need (arXiv:2511.10633 gamma_LS). The cluster counts a round as arrived only once all
+    its fragments are in."""
     def begin_operation(self, op:Operation) -> None:...
     def round_payload(self, op:Operation, round_index:int) -> SyndromePayload:...
 
@@ -55,11 +65,24 @@ class LayoutModel(Protocol):
 
 @runtime_checkable
 class DecodingScheme(Protocol):
-    """plan_windows decides the window boundaries (commit/buffer rounds), 
-    and data_complete decides when a window has enough rounds to be 
-    handed off. It organizes the syndrome stream into decodable chunks."""
+    """plan_windows decides the window boundaries (commit/buffer rounds),
+    and data_complete decides when a window has enough rounds to be
+    handed off. It organizes the syndrome stream into decodable chunks.
+
+    plan_windows returns 3-tuples (commit_lo, commit_hi, buffer_hi) or 4-tuples
+    (buffer_lo, commit_lo, commit_hi, buffer_hi) for windows with a LEADING buffer.
+
+    OPTIONAL extension hooks (duck-typed; the WindowPlanner falls back to the sequential
+    chain when absent, so existing schemes need not implement them). The dependency
+    STRUCTURE between windows is part of the windowing strategy -- a sequential scheme
+    chains its windows, the parallel A/B scheme (arXiv:2511.10633 Sec II.4) makes layer-B
+    windows depend on their two layer-A neighbours:
+        wire_deps(windows: list[Window]) -> None       # set deps among ONE op's windows
+        entry_windows(windows) -> list[Window]         # receive predecessor-op boundaries
+        exit_windows(windows) -> list[Window]          # emit boundaries to successor ops
+    """
     def plan_windows(self, op_id: int, n_rounds: int,
-                     code: CodeModel) -> list[tuple[int, int, int]]: ...
+                     code: CodeModel) -> list[tuple]: ...
     def data_complete(self, window: Window, rounds_arrived: int, successor_rounds: int,
                       memory_rounds: int, n_rounds: int, has_successor: bool,
                       op: Operation = None, layout: LayoutModel = None) -> bool: ...
@@ -74,35 +97,91 @@ class ExecutionPlanner(Protocol):
 
 @runtime_checkable
 class RoundsPolicy(Protocol):
-    """ Thiis is responsible for deciding how many qec rounds an operation runs for
-    changable so that we can test steady rounds or derived them pre code or compute 
-    them form form other things depending on the operation and the code."""
+    """ This decides how many QEC rounds an operation runs for. It is swappable so we can
+    test a fixed global round count (FixedRounds), per-code round counts (CodeRounds), or
+    counts computed from anything else about the operation and its code."""
     def rounds_for(self, op: "Operation", code: "CodeModel") -> int: ...
 
 @runtime_checkable
 class Decoder(Protocol):
-    """ This receives a DecodeJob and answer two seperate questions:
-    latency(job) = how many ticks the decode takes 
-    (this is what advances the simulated clock), and decode(job) = 
-    the actual logical result/correction."""
+    """ This receives a DecodeJob and answers two separate questions:
+    latency(job) = how many ticks the decode takes
+    (this is what advances the simulated clock), and decode(job) =
+    the actual logical result/correction.
+
+    BOUNDARY-DATA convention (windowed real decoding; arXiv:2209.08552 Sec I.B/Fig. 2,
+    arXiv:2511.10633 Sec II.4): a windowed decoder commits only the correction edges
+    inside the commit region (job.window has the geometry); for chains that CROSS out of
+    it, it reports artificial defects -- the nodes just outside the commit region on such
+    edges -- as DecodeResult.boundary_defects = {round (or (round, patch_id)): bit-mask}
+    in the op's round numbering. The cluster ships them over the t_dd hop and XORs them
+    into the dependent window's payloads at assembly. Timing-only decoders return None
+    (the hop still clears the dependency). NOTE (arXiv:2209.08552): the inner decoder
+    must return approximately LOW-WEIGHT corrections (MWPM/UF) -- homology-class decoders
+    create spurious artificial defects."""
 
     def latency(self, job: DecodeJob) -> int: ...
     def decode(self, job: DecodeJob) -> DecodeResult: ...
 
 @runtime_checkable
 class Scheduler(Protocol):
-    """ This is the policy for the decode cluster sheduling ready queue of decode jobs.
-    insert puts a job in the queue, and pop chooses the next job to run."""
+    """ This is the decode cluster's queue-ordering policy for the ready queue of decode
+    jobs. insert puts a job in the queue, and pop chooses the next job to run."""
     def insert(self, queue: list, job: DecodeJob) -> None: ...
     def pop(self, queue: list) -> DecodeJob: ...
 
+
+@runtime_checkable
+class DeadlinePolicy(Protocol):
+    """Assigns each window job its deadline when it is enqueued -- what gives a
+    deadline-aware Scheduler (EDF) something real to order by. `on_reaction_path` is True
+    when the op's decode result gates a waiting non-Clifford gate (the reaction path of
+    arXiv:2511.10633); the default EnqueueTimeDeadline ignores it (deadline = now, so EDF
+    behaves like FIFO), ReactionPathDeadline prioritizes it."""
+    def deadline(self, op: Operation, window: Window, now: int,
+                 on_reaction_path: bool) -> int: ...
+
+
+@runtime_checkable
+class DecoderRouter(Protocol):
+    """Picks the decoder for each DecodeJob at dispatch time. The default CodeRouter
+    routes by job.code (per-code decoders, G1); a custom router can route by job.hint /
+    job.attempt -- the seam needed for decoder switching (escalate a low-confidence window
+    to a strong decoder, arXiv:2510.25222) and for clusters mixing decoding devices with
+    different latency models (FPGA / ASIC / GPU / CPU)."""
+    def route(self, job: DecodeJob) -> "Decoder": ...
+
 @runtime_checkable
 class DecoderService(Protocol):
-    """Lets any component submit a decode job to the decoder cluster and get back the result when its done
-    This is how the factorys correction-qubit decoding is routed through the REAL cluster instead of being
-    abstracted away."""
+    """Lets any component submit a decode job to the decoder cluster and get back the result
+    when it's done. This is how the factory's correction-qubit decoding is routed through the
+    REAL cluster instead of being abstracted away."""
     def submit_decode(self, n_rounds: int, on_done: Callable[[], None],
-                      label: str = ..., deadline: Optional[int] = ...) -> None: ...
+                      label: str = ..., deadline: Optional[int] = ...,
+                      code: Optional[str] = ...,
+                      spatial_nodes: Optional[int] = ...) -> None: ...
+
+
+@runtime_checkable
+class WorkloadManager(DecoderService, Protocol):
+    """The decoder-cluster seam: the paper's "workload manager" (arXiv:2511.10633 Sec III)
+    as the chip and the wiring see it. This is the EXPLICIT contract a custom cluster must
+    satisfy (it was previously implicit in DecoderCluster):
+      - register_op / build_windows / load_execution_plan: install the workload,
+      - rounds_for: the agreed temporal length of each operation (chip cadence reads it),
+      - on_syndrome_arrival / on_memory_round: the controller's delivery targets,
+      - submit_decode (inherited DecoderService): external jobs (factory, idle rounds).
+    Documented ATTRIBUTES the standard wiring also relies on (not isinstance-checked):
+      layout, scheme, rounds_policy   -- read to build the default WindowPlanner; a custom
+                                         manager without them must be paired with planner=
+      on_workload_complete            -- lifecycle sink the wiring sets (factory shutdown)
+      queue_log                       -- optional [(t, queue_len)] trace for the summary"""
+    def register_op(self, op: Operation) -> None: ...
+    def build_windows(self) -> None: ...
+    def load_execution_plan(self, plan: WindowPlan) -> None: ...
+    def rounds_for(self, op: Operation) -> int: ...
+    def on_syndrome_arrival(self, payload: SyndromePayload) -> None: ...
+    def on_memory_round(self, op_id: int) -> None: ...
 
 
 @runtime_checkable
@@ -133,18 +212,18 @@ class Orchestrator(Protocol):
 
 @runtime_checkable
 class MagicStateFactory(Protocol):
-    """A non - clifford gates asks the factory for a distilled magic state, this provides a
-    way to check it can be done on time or you have to wait."""
+    """A non-Clifford gate asks the factory for a distilled magic state; this seam decides
+    whether the state is in stock or the gate has to wait (the supply stall)."""
     def request(self, op_id: int, callback: Callable[[], None]) -> None: ...
     def shutdown(self) -> None: ...   # stop background production; wired to cluster.on_workload_complete
 
 @runtime_checkable
 class QuantumProcessor(Protocol):
-    """The QPU seam it drive the round cadence and emits syndromes through the controller
-    enforces data dependencies and t gate gating and receives the decoded correrction back
-    Load: begins executing the DAG, on_decision(decision) receives a
-    returned correction (releasing a blocked gate). There is `last_finish_time` is a documented
-    attribute, not a checked protocol member"""
+    """The QPU seam: drives the round cadence, emits syndromes through the controller,
+    enforces data dependencies and T-gate gating, and receives the decoded correction back.
+    load(ops) begins executing the DAG; on_decision(decision) receives a returned
+    correction (releasing a blocked gate). `last_finish_time` is a documented attribute,
+    not a checked protocol member."""
     def load(self, ops: list) -> None: ...
     def on_decision(self, decision: Decision) -> None: ...
  
