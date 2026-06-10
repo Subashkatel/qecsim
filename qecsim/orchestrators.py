@@ -28,7 +28,11 @@ if TYPE_CHECKING:                      # type-only; the controller is wired in a
 # =====================================================================================
 
 class PauliFrameOrchestrator:
-    """The default orchestrator implementation, which just tracks the Pauli frame and feeds it back to the controller as needed."""
+    """The default orchestrator: integrates decode results, decides the conditional basis
+    for gated gates, and dispatches those decisions back to the chip via the controller.
+    NOTE: `pauli_frame` is a bookkeeping PLACEHOLDER (a per-op marker, garbage-collected by
+    _record_and_gc), not a real physical/logical Pauli frame -- real frame tracking needs
+    the real-data decode path (docs/README.md gap #7)."""
 
     def __init__(self, engine: Engine, history_size: int = 512, retain_all: bool = False):
         """Hold the Pauli frame and the map of which gate each operation gates."""
@@ -56,9 +60,9 @@ class PauliFrameOrchestrator:
         self.decision_sink = decision_sink
 
     def register_gate(self, gated_op_id: int, gating_op_id: int) -> None:
-        """Record that operation `blocked` waits on the decode result of `blocked`. ONE blocking op
-        may block MULTIPLE successors -- a single measurement outcome can feed-forward to several
-        conditional gates -- so successors accumulate in a list."""
+        """Record that operation `gated_op_id` waits on the decode result of `gating_op_id`.
+        ONE gating op may block MULTIPLE successors -- a single measurement outcome can
+        feed-forward to several conditional gates -- so successors accumulate in a list."""
         self.gated_by_index.setdefault(gating_op_id, []).append(gated_op_id)
  
     def announce_plan(self, plan: "WindowPlan") -> None:
