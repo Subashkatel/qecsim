@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 # ================================================================================
 # CODES
-# The code model implementations everything code-specific the control
-# and decoding simulation needs  so the rest of the engine stays code-agnostic
-# we can swap in and out different codes without changing the rest of the system.
+# The code model implementations: everything code-specific that the control and
+# decoding simulation needs, so the rest of the engine stays code-agnostic and
+# we can swap codes in and out without changing the rest of the system.
 # ================================================================================
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class SurfaceCodeModel:
     its memory windows from d-sized commit/buffer sub-regions); the per-round decoding
     graph has ~d^2 nodes (arXiv:2511.10633 evaluates tau_d at N = d^2 per round)."""
     d: int = 3
+    round_us: Optional[float] = None  # per-code syndrome-round time (us); None = chip's global cadence. Lets heterogeneous zones run different physical cycle times (e.g. ~0.5 us superconducting stabilization rounds, arXiv:2411.10406 Sec I.2.1, vs 1 us/cycle, arXiv:2510.21600)
 
     @property
     def name(self) -> str:
@@ -72,6 +74,7 @@ class BBCodeModel:
     num_checks: int = 132   # n - k independent stabilizer checks
     n_detectors: int = 936  # detectors in the d-round circuit decoding matrix (arXiv:2511.21660)
     n_faults: int = 8784    # fault-mechanism columns in the same matrix (arXiv:2511.21660)
+    round_us: Optional[float] = None  # per-code syndrome-round time (us); None = chip's global cadence (the gross-code memory runs 1 us cycles in arXiv:2510.21600)
 
     @property
     def name(self) -> str:
@@ -118,6 +121,7 @@ class ColorCodeModel:
     """Triangular color code """
     d: int = 3
     node_factor: float = 0.75   # ~3/4 d^2 data qubits for the triangular code
+    round_us: Optional[float] = None  # per-code syndrome-round time (us); None = chip's global cadence
 
     @property
     def name(self) -> str:
@@ -160,6 +164,7 @@ class ColorCodeModel:
 class ToricCodeModel:
     """Toric code """
     d: int = 3
+    round_us: Optional[float] = None  # per-code syndrome-round time (us); None = chip's global cadence
 
     @property
     def name(self) -> str:
