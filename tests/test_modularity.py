@@ -155,8 +155,6 @@ class MyController:
         self.engine.schedule(us(0.1), lambda: deliver(payload))
     def relay_instruction(self, decision, deliver):
         self.engine.schedule(us(0.1), lambda: deliver(decision))
-    def dec_to_dec_delay(self): return us(0.1)
-    def dec_to_orch_delay(self): return us(0.1)
 
 class MyOrchestrator:
     def __init__(self, engine):
