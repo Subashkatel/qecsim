@@ -115,13 +115,15 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
                   else InfiniteFactory(engine)
 
     # QPU seam: a custom processor via make_chip(engine, device, controller, cluster, factory,
-    # round_ticks, rounds_per_op, code), or the default Chip. It must satisfy QuantumProcessor.
+    # round_ticks, code), or the default Chip. It must satisfy QuantumProcessor. Note the
+    # per-op round count is not passed: it belongs to the cluster's ROUNDS policy
+    # (cluster.rounds_for(op)), the single source of truth a chip should read.
     if make_chip is not None:
         chip = make_chip(engine, device, controller, cluster, factory,
-                         us(round_us), rounds_per_op, code)
+                         us(round_us), code)
     else:
         chip = Chip(engine, device, controller, cluster, factory,
-                    round_ticks=us(round_us), rounds_per_op=rounds_per_op,
+                    round_ticks=us(round_us),
                     code_distance=code.distance, decode_idle_rounds=decode_idle_rounds)
     # Dependency inversion: the cluster gets only the callbacks it needs, not the chip object.
     orchestrator.connect(controller, chip.on_decision)  # orchestrator owns the conditional return path
