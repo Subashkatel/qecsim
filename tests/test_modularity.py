@@ -43,7 +43,7 @@ def test_default_implementations_satisfy_their_protocols():
     cluster = DecoderCluster(eng, PresetLatencyDecoder(1.0), FifoScheduler(),
                              ctrl, orch, num_units=1, code_distance=3)
     chip = Chip(eng, TimingOnlyDevice(), ctrl, cluster, InfiniteFactory(eng),
-                round_ticks=us(1.0), rounds_per_op=11, code_distance=3)
+                round_ticks=us(1.0), code_distance=3)
     pairs = [
         (P.InputFrontend, CircuitFrontend([])),
         (P.InputFrontend, SurgeryIRFrontend("")),
