@@ -52,6 +52,24 @@ class CodeRounds:
             else code.rounds_per_logical_cycle()
         return max(1, int(round(self.scale * base)))
 
+class GateRounds:
+    """Per-gate rounds under lattice surgery: a multi-qubit operation is modeled as the
+    ZZ-then-XX merge pair (merge_steps * d rounds, merge_steps=2 by default); a
+    single-qubit operation is one patch deformation (d rounds). Duration is set by fault
+    tolerance (the merged stabilizers are repeated ~d times), NOT by qubit count -- a
+    wider operation produces more data PER ROUND (the layout's spatial_nodes already
+    scales with the op's qubits), not more rounds. Litinski (arXiv:1808.02892 Sec 1.1)
+    performs ANY multi-patch measurement in one d-round time step: use merge_steps=1
+    for that compilation."""
+    def __init__(self, merge_steps: int = 2):
+        """merge_steps: how many d-round surgery steps a multi-qubit op takes."""
+        self.merge_steps = int(merge_steps)
+
+    def rounds_for(self, op, code) -> int:
+        """Multi-qubit ops take merge_steps * d rounds; single-qubit ops take d."""
+        d = code.distance
+        return self.merge_steps * d if len(op.qubits) >= 2 else d
+
 #TODO: This is for testing only, remove it in the future or update it
 class WindowPlanner:
     """The default ExecutionPlanner: the orchestrator's offline window/job planner.

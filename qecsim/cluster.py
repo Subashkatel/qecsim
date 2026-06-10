@@ -104,10 +104,6 @@ class DecoderCluster:
         # rounds_policy=CodeRounds() for per-code rounds so high-distance zones' buffers fit.
         self.rounds_policy = rounds_policy if rounds_policy is not None \
             else FixedRounds(rounds_per_op)
-        # representative count for the summary log and any external readers; per-op work uses
-        # self.rounds_for(op). For FixedRounds this equals the old global rounds_per_op.
-        self.R = self.rounds_policy.rounds_for(None, self.code)
- 
         # per-op bookkeeping
         self.ops: dict[int, Operation] = {}
         self.rounds_arrived: dict[int, int] = {}   # highest round number arrived for op
@@ -199,7 +195,8 @@ class DecoderCluster:
         # wire dependents into the cluster's view (the plan already filled them on the Windows)
         self.engine.log("DecoderClstr",
                         f"received execution plan: d={self.d}, commit={self.commit}, "
-                        f"buffer={self.buffer}, {self.R} rounds/op -> "
+                        f"buffer={self.buffer}, "
+                        f"{plan.summary.get('rounds_per_op', '?')} rounds/op -> "
                         f"{plan.nwin.get(next(iter(self.ops), 0), 0)} "
                         f"windows per operation, {plan.total_windows} windows total")
  

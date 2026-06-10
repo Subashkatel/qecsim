@@ -16,6 +16,7 @@ from qecsim import (build_and_run, three_cnot_circuit, cnot_plus_two_t_circuit,
                     ParallelWindowScheme, WindowLatencyBreakdown)
 from qecsim.frontends.circuit import CircuitFrontend
 from qecsim.message import Operation
+from qecsim.planner import GateRounds
 
 D, RPO = 3, 11
 
@@ -73,8 +74,22 @@ def example6():
                   decoder=PresetLatencyDecoder(1.0),
                   title="6) THREE CNOTs, 6 qubits, 1 decoder unit")
 
+def example7():
+    """Per-gate rounds (GateRounds policy): the CNOT is a ZZ+XX merge pair (2d rounds),
+    the H is one patch deformation (d rounds). Watch the trace: Op0 fires rounds 1..6,
+    Op1 fires rounds 1..3."""
+    ops = CircuitFrontend([
+        Operation(0, "Op0:CNOT(q0,q1)", (0, 1), clifford=True),
+        Operation(1, "Op1:H(q0)", (0,), clifford=True),
+    ]).build()
+    build_and_run(ops, num_units=1, d=D, rounds_policy=GateRounds(),
+                  decoder=PresetLatencyDecoder(1.0),
+                  title="7) PER-GATE ROUNDS -- CNOT(q0,q1) runs 2d rounds, H(q0) runs d rounds")
+
+
 # example number -> function. Add a new example by registering it here.
-EXAMPLES = {1: example1, 2: example2, 3: example3, 4: example4, 5: example5, 6: example6}
+EXAMPLES = {1: example1, 2: example2, 3: example3, 4: example4, 5: example5, 6: example6,
+            7: example7}
 
 
 def main(argv):
