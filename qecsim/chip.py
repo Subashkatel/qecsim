@@ -27,18 +27,18 @@ class Chip:
     and emits idle rounds while waiting."""
     def __init__(self, engine: Engine, device: DeviceModel, controller: Controller,
                  cluster: WorkloadManager, factory: MagicStateFactory,
-                 round_ticks: int, rounds_per_op: int, code_distance: int,
+                 round_ticks: int, code_distance: int,
                  decode_idle_rounds: bool = False):
-        """Wire the chip to its device, controller, cluster, and factory; set the round cadence."""
+        """Wire the chip to its device, controller, cluster, and factory; set the round cadence.
+        Each operation's temporal length is NOT a chip parameter: it comes from
+        cluster.rounds_for(op) (the ROUNDS policy), so the chip can never disagree with
+        the planner/cluster."""
         self.engine = engine
         self.device = device
         self.controller = controller
         self.cluster = cluster
         self.factory = factory
         self.round_ticks = round_ticks
-        # NOTE: rounds_per_op is accepted for the wiring's construction signature but not
-        # stored -- each operation's temporal length comes from cluster.rounds_for(op)
-        # (the ROUNDS policy), so the chip can never disagree with the planner/cluster.
         self.code_distance = code_distance    # patch distance; also the buffer size
         # IDLE-ROUND DECODING (off by default = original trace). arXiv:2511.10633: the
         # stabilization rounds a waiting patch keeps measuring must themselves be decoded
