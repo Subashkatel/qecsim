@@ -21,6 +21,10 @@ class SyndromePayload:
     code: Optional[str] = None # code name for this syndrome (e.g. "surface", "color", "heavyhex", etc.)
     n_fragments: int = 1 # how many payloads make up this op's round (one per PATCH when the device emits per-patch payloads). The CONTROLLER buffers a round's fragments and forwards them as one t_cd packet (arXiv:2511.10633 Sec III.1); the cluster's own fragment count is the receiving-side completeness backstop
 
+    def __post_init__(self):
+        if self.n_fragments < 1:
+            raise ValueError(f"n_fragments must be >= 1 (got {self.n_fragments})")
+
 @dataclass
 class MagicState:
     """ A distilled resource state a factory can hand to its consumers

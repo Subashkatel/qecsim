@@ -59,7 +59,7 @@ class ModularController:
         """Send a syndrome chip->controller->decoders. A whole-round payload is forwarded
         after the two hop delays; a fragment of a multi-fragment round is buffered at the
         controller until the round is complete, then the round ships as ONE packet."""
-        if payload.n_fragments <= 1:
+        if payload.n_fragments == 1:
             def at_controller():
                 """Second controller hop: deliver to the destination after the link delay."""
                 if self.log_syndromes:
@@ -73,6 +73,11 @@ class ModularController:
             return
 
         def at_controller_fragment():
+            # NOTE : For future usecase where if the qpu device doesn't send the full
+            # rounds syndrome so the controller needs to buffer the fragments until 
+            # the full round is received, then package and forward to the decoder. 
+            # The current implementation of the qpu device sends the full round 
+            # syndrome so this code is not used, but it is implemented for future usecase.
             """Buffer this fragment; on the round's last fragment, package and forward."""
             key = (payload.operation_id, payload.round_index)
             buf = self._pending.setdefault(key, [])
