@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 # CONFIGURATION 
 #===============================================================================
 
-# Time Units : The simulator uses integers ticks (simiilar to classical gem5 simulator)
+# Time Units : The simulator uses integer ticks (similar to the classical gem5 simulator)
 # 1 tick = 1 picosecond (global frequency)
 TICKS_PER_US = 1_000_000
 
@@ -20,7 +20,7 @@ def us(microseconds : float) -> int:
     return int(round(microseconds * TICKS_PER_US))
 
 def fmt(ticks : int ) -> str:
-    """Format ticks as microseconds for readiability in logs."""
+    """Format ticks as microseconds for readability in logs."""
     return f"{ticks / TICKS_PER_US:7.3f} us"
 
 
@@ -44,6 +44,7 @@ class SimConfig:
     t_do_us: float = 1.0   # decoder -> orchestrator latency (microseconds)
     t_oc_us: float = 4.0   # orchestrator -> controller latency (microseconds)
     t_cq_us: float = 0.15  # controller -> chip latency (microseconds)
+    t_pack_us: float = 0.0 # controller packaging cost per round packet (microseconds): the controller aggregates a round's fragments into one t_cd packet (arXiv:2511.10633 Sec III.1); this prices the serialization/compression step (0 = free, the paper folds it into t_cd)
 
     # tau_d(N) = alpha * N^beta: Collision Cluster FPGA fit, arXiv:2511.10633 Table 3
     decoder_alpha: float = 2.85e-10
@@ -57,7 +58,8 @@ class SimConfig:
             raise ValueError(f"rounds_per_op must be >= 1 (got {self.rounds_per_op})")
         if self.num_units < 1:
             raise ValueError(f"num_units must be >= 1 (got {self.num_units})")
-        for name in ("t_qc_us", "t_cd_us", "t_dd_us", "t_do_us", "t_oc_us", "t_cq_us"):
+        for name in ("t_qc_us", "t_cd_us", "t_dd_us", "t_do_us", "t_oc_us", "t_cq_us",
+                     "t_pack_us"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} must be >= 0 (got {getattr(self, name)})")
         if self.decoder_alpha < 0 or self.decoder_beta < 0:
@@ -70,7 +72,8 @@ class SimConfig:
         return ModularController(engine,
                                  t_qc=us(self.t_qc_us), t_cd=us(self.t_cd_us),
                                  t_dd=us(self.t_dd_us), t_do=us(self.t_do_us),
-                                 t_oc=us(self.t_oc_us), t_cq=us(self.t_cq_us))
+                                 t_oc=us(self.t_oc_us), t_cq=us(self.t_cq_us),
+                                 t_pack=us(self.t_pack_us))
 
     def make_decoder(self, code: "CodeModel") -> "Decoder":
         """Build the default latency-model decoder for the given code (lazy import, as above)."""
