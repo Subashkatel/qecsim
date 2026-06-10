@@ -16,13 +16,15 @@ if TYPE_CHECKING:
 # plan is communicated to the decoder cluster AHEAD OF TIME, so planning costs zero simulated
 # ticks and never sits on the reaction path.
 #
-# SEAM NOTE (windowing studies): the window LAYOUT comes from the DecodingScheme, but the
-# DEPENDENCY wiring between windows is currently fixed HERE (sequential intra-op chain +
-# first-window-on-predecessors). A scheme whose dependency structure differs -- e.g. the
-# parallel A/B-layer windowing of arXiv:2511.10633 Sec II.4 (layer-A windows independent,
-# layer-B windows depend on their A neighbours) or speculative windowing -- needs a planner
-# variant that wires those deps. Swapping the planner is the supported way to do that; the
-# runtime cluster does not change.
+# SEAM NOTE (windowing studies): the window LAYOUT and the INTRA-op dependency structure
+# both come from the DecodingScheme -- via plan_windows plus the optional hooks wire_deps /
+# entry_windows / exit_windows (see the DecodingScheme protocol). Without the hooks this
+# planner falls back to the sequential chain, so plain schemes need not implement them;
+# ParallelWindowScheme uses wire_deps for its A/B-layer structure (arXiv:2511.10633
+# Sec II.4) with no planner change. Only the CROSS-op rule lives here, because only the
+# planner sees the operation DAG. A planning algorithm that differs beyond what the hooks
+# express (e.g. speculative early boundary exchange) swaps the whole planner via
+# build_and_run(planner=...); the runtime cluster does not change either way.
 #==================================================================================================
 
 #TODO: This is for testing only, remove it in the future
@@ -52,19 +54,21 @@ class CodeRounds:
 
 #TODO: This is for testing only, remove it in the future or update it
 class WindowPlanner:
-    """The default ExecutionPlanner the orchestrator's offline window/job planner.
- 
-    Given the operations, for each one it asks the DecodingScheme for the window layout (under
-    that operation's own code, via the LayoutModel, so heterogeneous QPUs get per-zone windows),
-    wires the inter-window dependency graph (intra-operation chain + each operation's first
-    window depending on the last window of each predecessor), and records the decode-job size
-    (spatial nodes) per operation. The result is a WindowPlan handed to the cluster ahead of
-    time. This is pure compile-time work it runs before any syndrome flows and costs zero
-    simulated ticks, same as the paper specifies (Impacts of Decoder Paper).
- 
-    The planning ALGORITHM lives here (not in the cluster), so swapping the planner e.g. a
-    future parallel-window or spatial-window planner, changes the plan without touching the
-    runtime cluster."""
+    """The default ExecutionPlanner: the orchestrator's offline window/job planner.
+
+    Given the operations, for each one it asks the DecodingScheme for the window layout
+    (under that operation's own code, via the LayoutModel, so heterogeneous QPUs get
+    per-zone windows) and for the intra-op dependency structure (the scheme's wire_deps /
+    entry_windows / exit_windows hooks, falling back to the sequential chain), wires the
+    cross-op edges (each operation's entry windows wait on its predecessors' exit
+    windows), and records the decode-job size (spatial nodes) per operation. The result
+    is a WindowPlan handed to the cluster ahead of time. This is pure compile-time work:
+    it runs before any syndrome flows and costs zero simulated ticks, as arXiv:2511.10633
+    Sec III specifies (the plan "is communicated to the decoder cluster ahead of time").
+
+    The planning ALGORITHM lives here (not in the cluster), so swapping the planner --
+    e.g. a future speculative-window or spatial-window planner -- changes the plan
+    without touching the runtime cluster."""
     
     def __init__(self, scheme: DecodingScheme, layout: LayoutModel, rounds):
         """Hold the windowing policy (scheme), per-patch codes (layout), and the ROUNDS policy.
@@ -91,22 +95,43 @@ class WindowPlanner:
         windows: dict = {}
         op_windows: dict = {}
         for oid in opmap:
-            for k, (commit_lo, commit_hi, buffer_hi) in enumerate(plans[oid]):
-                n_rounds = (commit_hi - commit_lo + 1) + (buffer_hi - commit_hi)
+            for k, spec in enumerate(plans[oid]):
+                # a scheme returns 3-tuples (commit_lo, commit_hi, buffer_hi) or, for windows
+                # with a LEADING buffer (parallel A/B scheme), 4-tuples prefixed by buffer_lo.
+                if len(spec) == 3:
+                    commit_lo, commit_hi, buffer_hi = spec
+                    buffer_lo = commit_lo
+                else:
+                    buffer_lo, commit_lo, commit_hi, buffer_hi = spec
+                n_rounds = buffer_hi - buffer_lo + 1
                 w = Window(op_id=oid, k=k, commit_lo=commit_lo, commit_hi=commit_hi,
-                           buffer_hi=buffer_hi, n_rounds=n_rounds)
+                           buffer_hi=buffer_hi, n_rounds=n_rounds, buffer_lo=buffer_lo)
                 windows[(oid, k)] = w
                 op_windows.setdefault(oid, []).append(k)
+        # ---- dependency wiring. The INTRA-op structure belongs to the windowing scheme
+        # (a sequential scheme chains its windows; the parallel A/B scheme has layer-B
+        # windows depending on their two layer-A neighbours). The scheme provides it via
+        # the optional hooks wire_deps / entry_windows / exit_windows; without them the
+        # planner falls back to the original sequential chain, byte-identical to before.
+        wire = getattr(self.scheme, "wire_deps", None)
+        entry = getattr(self.scheme, "entry_windows", None)
+        exits = getattr(self.scheme, "exit_windows", None)
         for oid, op in opmap.items():
-            for k in range(nwin[oid]):
-                w = windows[(oid, k)]
-                if k > 0:
-                    w.deps.append((oid, k - 1))                 # intra-op chain
-                else:
-                    for p in op.predecessors:
-                        w.deps.append((p, nwin[p] - 1))         # predecessor's last window
-                w.deps_remaining = len(w.deps)
+            ws = [windows[(oid, k)] for k in range(nwin[oid])]
+            if wire is not None:
+                wire(ws)
+            else:
+                for k in range(1, nwin[oid]):
+                    ws[k].deps.append((oid, k - 1))             # intra-op chain
+            # CROSS-op wiring stays here (only the planner sees the DAG): each entry window
+            # of this op waits for each exit window of every predecessor operation.
+            for w_in in (entry(ws) if entry is not None else [ws[0]]):
+                for p in op.predecessors:
+                    pws = [windows[(p, k)] for k in range(nwin[p])]
+                    for w_out in (exits(pws) if exits is not None else [pws[-1]]):
+                        w_in.deps.append((p, w_out.k))
         for key, w in windows.items():
+            w.deps_remaining = len(w.deps)
             for dep in w.deps:
                 windows[dep].dependents.append(key)
         spatial = {oid: self.layout.spatial_nodes_for(op) for oid, op in opmap.items()}
