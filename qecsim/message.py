@@ -48,7 +48,8 @@ class DecodeJob:
     spatial_nodes: Optional[int] = None # Decoding graph nodes per round (spatial size of the decode job)
     code: Optional[str] = None  # which code this job belongs to (e.g. "surface", "color", "heavyhex", etc.) for code-specific decoding strategies or logs
     attempt: int = 0 # decode attempt number (0 = first pass); a DecoderRouter can escalate re-enqueued jobs (decoder switching, arXiv:2510.25222)
-    hint: Optional[str] = None # routing hint for a DecoderRouter (e.g. "strong" for an escalated decoder-switching job); None = route normally
+    hint: Optional[str] = None # routing hint for a DecoderRouter (e.g. "strong" for an escalated decoder-switching job); None = route normally. When the hint names one of the cluster's unit pools, the job also runs on that pool's units/queue
+    pool: Optional[str] = None # the unit pool this job dispatched on (set by the cluster AT DISPATCH, so the right pool's unit is freed even if a decoder mutates `hint` mid-flight)
     window: Optional["Window"] = None # the Window this job decodes (None for external jobs). Gives the decoder the commit/buffer geometry it needs to place artificial defects (DecodeResult.boundary_defects) at the commit boundary -- the one place decoder and windowing scheme must agree (arXiv:2209.08552 Fig. 2)
 
 @dataclass
