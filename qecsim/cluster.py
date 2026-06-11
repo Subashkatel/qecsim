@@ -236,7 +236,13 @@ class DecoderCluster:
         # arXiv:2511.10633 Sec III.1); the count here is the receiving-side completeness
         # BACKSTOP for custom controllers that forward fragments individually -- a window
         # must never be assembled from half a round.
-        fragments = self.payload_store[op.id].setdefault(payload.round_index, {})
+        op_store = self.payload_store.get(op.id)
+        if op_store is None:
+            raise RuntimeError(
+                f"round {payload.round_index} of {op.name} arrived after the op's last "
+                f"window committed and its syndrome RAM was freed -- the device emitted "
+                f"more rounds than the execution plan expects")
+        fragments = op_store.setdefault(payload.round_index, {})
         if payload.patch_id not in fragments:      # a re-delivered fragment is not new storage
             self.payloads_held += 1
         fragments[payload.patch_id] = payload
