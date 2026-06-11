@@ -115,12 +115,19 @@ class SwitchingDecoder:
     (weak decode to produce the soft output, decoder->decoder handoff of the assigned
     region, strong decode, handoff back); otherwise it pays tau_weak alone. The paper
     shows gamma_switch decays exponentially with code distance, so it is a knob here.
-    Expected latency: (1-gamma)*tau_weak + gamma*(tau_weak + 2*handoff + tau_strong).
+    Expected latency: T_comm_weak + tau_weak + gamma*(2*handoff + tau_strong).
 
     This answers "is switching worth it" at the latency/queueing level: both decoders'
     own latency models are used per job, and the inter-decoder message passing is an
     explicit, separately-priced hop (`handoff_us`, default = the t_dd link of
     arXiv:2511.10633 Table 2; an FPGA->GPU link can be priced differently).
+
+    `t_comm_weak_us` is the paper's T_comm^weak: a communication cost paid on EVERY
+    decode, weak path included (the backlog recursion has both T_comm^weak and
+    T_comm^strong terms; the paper's studies use T_comm^weak = tau_gen). Default 0,
+    because in a full-stack run the controller's t_cd link already prices the weak
+    path's syndrome delivery -- set it only for standalone studies that reproduce the
+    paper's recursion parameters, or you double-count that communication.
 
     What it does NOT model is the double-window interaction (the strong decoder taking
     r_strong = r_com + 2*r_buf rounds while the weak stream pauses and resumes) -- that
@@ -128,24 +135,26 @@ class SwitchingDecoder:
     DecoderRouter escalation path. The switch decision is drawn once per job in latency()
     and recorded on job.hint, so decode() reports the same path."""
     def __init__(self, weak: "Decoder", strong: "Decoder", gamma_switch: float,
-                 handoff_us: float = 0.5, seed: int = 0):
-        """Hold the two decoders, the switch probability, and the handoff link latency."""
+                 handoff_us: float = 0.5, seed: int = 0,
+                 t_comm_weak_us: float = 0.0):
+        """Hold the two decoders, the switch probability, the handoff link latency,
+        and the per-decode weak-path communication cost (see class docstring)."""
         import random
         self.weak = weak
         self.strong = strong
         self.gamma_switch = gamma_switch
         self.handoff = us(handoff_us)
+        self.t_comm_weak = us(t_comm_weak_us)
         self.rng = random.Random(seed)
         self.switches = 0                      # diagnostic: how many jobs escalated
 
     # TODO(switching): add the threshold trigger -- sample a soft output g per job from a
     # configurable distribution and switch iff g < g_th, so g_th becomes a real sweep axis
-    # matching arXiv:2510.25222 (gamma_switch stays as the flat-probability default). Also
-    # add an optional T_comm_weak charged on EVERY decode -- the paper prices weak-path
-    # communication too (its backlog recursion Eq. 12 has both T_comm^weak and T_comm^strong).
+    # matching arXiv:2510.25222 (gamma_switch stays as the flat-probability default).
     def latency(self, job: DecodeJob) -> int:
-        """Weak latency, plus (with probability gamma_switch) handoffs + strong latency."""
-        lat = self.weak.latency(job)
+        """T_comm^weak + weak latency, plus (with probability gamma_switch) handoffs +
+        strong latency."""
+        lat = self.t_comm_weak + self.weak.latency(job)
         if self.rng.random() < self.gamma_switch:
             job.hint = "strong"                # remember the path so decode() agrees
             self.switches += 1
