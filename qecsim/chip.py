@@ -1,6 +1,6 @@
 from __future__ import annotations
  
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING
  
 from .config import us
 from .engine import Engine
@@ -28,7 +28,8 @@ class Chip:
     def __init__(self, engine: Engine, device: DeviceModel, controller: Controller,
                  cluster: WorkloadManager, factory: MagicStateFactory,
                  round_ticks: int, code_distance: int,
-                 decode_idle_rounds: bool = False):
+                 decode_idle_rounds: bool = False,
+                 max_idle_rounds: Optional[int] = None):
         """Wire the chip to its device, controller, cluster, and factory; set the round cadence.
         Each operation's temporal length is NOT a chip parameter: it comes from
         cluster.rounds_for(op) (the ROUNDS policy), so the chip can never disagree with
@@ -67,8 +68,11 @@ class Chip:
         self.gate_released: set[int] = set()       # for non-Clifford gating
         self.last_finish_time = 0
         # safety bound for the continuous idle-round emitter (a gate that never returns would
-        # otherwise schedule forever); generous vs any realistic reaction time.
-        self.MAX_IDLE_ROUNDS = 100 * code_distance
+        # otherwise schedule forever). The default is generous vs any realistic reaction time,
+        # but a backlog/divergence study NEEDS waits longer than that -- raise it there, and
+        # the chip logs loudly if it ever fires (results past it understate the backlog).
+        self.max_idle_rounds = max_idle_rounds if max_idle_rounds is not None \
+            else 100 * code_distance
  
     # ---- round cadence ------------------------------------------------------
     def _round_ticks_for(self, op: Operation) -> int:
@@ -244,8 +248,16 @@ class Chip:
         """Emit idle memory round k for an idling patch, then schedule the next one -- continuing
         every round until the gated successor is released (or has started), modelling a QPU that
         keeps measuring stabilizers while it waits in storage. Self-terminating + capped."""
-        if k > self.MAX_IDLE_ROUNDS or not self._has_waiting_gated_successor(op_id):
+        if not self._has_waiting_gated_successor(op_id):
             return                                          # gate returned (or started): stop
+        if k > self.max_idle_rounds:
+            self.engine.log("Chip",
+                            f"WARNING: {self.ops[op_id].name} hit the idle-round cap "
+                            f"(max_idle_rounds={self.max_idle_rounds}) with its gated "
+                            f"successor still waiting -- no more memory rounds will be "
+                            f"emitted, so decoder load and backlog past this point are "
+                            f"UNDERSTATED. Raise max_idle_rounds for long-reaction studies.")
+            return
         self.controller.relay_syndrome(
             SyndromePayload(op_id, patch, k),
             lambda p, o=op_id: self.cluster.on_memory_round(o))
