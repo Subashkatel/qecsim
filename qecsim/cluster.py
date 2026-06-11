@@ -202,6 +202,11 @@ class DecoderCluster:
         """A pool's ready queue (self.ready IS the default pool's queue)."""
         return self.ready if pool == "default" else self.pool_ready[pool]
 
+    def _queued_total(self) -> int:
+        """Jobs waiting across ALL pools' queues -- what queue_log records (identical to
+        len(self.ready) when no extra pools exist)."""
+        return len(self.ready) + sum(len(q) for q in self.pool_ready.values())
+
     @staticmethod
     def _pool_tag(pool: str) -> str:
         """Log prefix naming the pool -- empty for the default pool, so single-pool
@@ -411,7 +416,7 @@ class DecoderCluster:
         self.engine.log("DecoderClstr",
                         f"{op.name} W{w.k} (commit {w.commit_lo}-{w.commit_hi}) READY "
                         f"-> enqueue ({self._pool_tag(pool)}ready-queue length = {len(queue)})")
-        self.queue_log.append((self.engine.now, len(self.ready)))
+        self.queue_log.append((self.engine.now, self._queued_total()))
         self._try_dispatch()
  
     def submit_decode(self, n_rounds: int, on_done: Callable[[], None],
@@ -432,7 +437,7 @@ class DecoderCluster:
                         on_done=on_done, label=label, code=code,
                         spatial_nodes=spatial_nodes, hint=hint)
         self.scheduler.insert(self._queue_for(self._pool_for(job)), job)
-        self.queue_log.append((self.engine.now, len(self.ready)))
+        self.queue_log.append((self.engine.now, self._queued_total()))
         self._try_dispatch()
  
     def _try_dispatch(self) -> None:
@@ -451,7 +456,7 @@ class DecoderCluster:
                 self.engine.log("DecoderClstr",
                                 f"START DECODE {job.label} (waited {fmt(waited).strip()} in queue, "
                                 f"{self._pool_tag(pool)}units free now {self.pool_free[pool]})")
-                self.queue_log.append((self.engine.now, len(self.ready)))
+                self.queue_log.append((self.engine.now, self._queued_total()))
                 self.engine.schedule(lat, lambda j=job: self._on_decode_done(j),
                                      label=f"decode_done({job.label})")
  
