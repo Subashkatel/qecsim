@@ -118,3 +118,27 @@ def test_backlog_sweep_parallel_vs_sequential():
     assert par[4][1] <= par[1][1]
     # and with units available it beats the chain outright
     assert par[4][0] < seq[4][0]
+
+
+# ---- the naive (batch) baseline of arXiv:2510.25222 Sec III.C ------------------------
+
+def test_naive_scheme_is_one_batch_window_per_op():
+    from qecsim.schemes import NaiveOnlineScheme
+    plan = _plan(NaiveOnlineScheme(), _memory_op(), rounds_per_op=11, d=3)
+    assert plan.nwin[0] == 1
+    w = plan.windows[(0, 0)]
+    assert (w.commit_lo, w.commit_hi, w.buffer_hi) == (1, 11, 11)
+
+
+def test_naive_scheme_decodes_only_after_the_last_round():
+    """The defining cost of the baseline: nothing decodes until ALL rounds arrived."""
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from conftest import trace_time
+    from qecsim.schemes import NaiveOnlineScheme
+    r = build_and_run(_memory_op(), num_units=1, d=3, rounds_per_op=11,
+                      decoder=PresetLatencyDecoder(1.0), scheme=NaiveOnlineScheme(),
+                      verbose=False)
+    lines = r["engine"].log_lines
+    assert trace_time(lines, "START DECODE M(q0) W0") >= \
+           trace_time(lines, "round 11 of M(q0) arrived")
