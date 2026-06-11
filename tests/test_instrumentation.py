@@ -77,3 +77,41 @@ def test_backlog_grows_when_the_decoder_is_too_slow():
                           verbose=False)
         waits[lat] = r["metrics"]["backlog_trajectory"]["max_wait"]
     assert waits[50.0] > waits[1.0]
+
+
+def test_backlog_rows_cover_fan_out_gating():
+    """ONE decoded outcome can release SEVERAL gated gates: one row each, and they
+    share the same reaction wait (same gating decode, same dispatch event)."""
+    from qecsim.frontends.circuit import CircuitFrontend
+    from qecsim.message import Operation
+    ops = CircuitFrontend([
+        Operation(0, "A:T(q0)", (0,), clifford=False),
+        Operation(1, "B:T(q1)", (1,), clifford=False, gated_by=0),
+        Operation(2, "C:T(q2)", (2,), clifford=False, gated_by=0),
+    ]).build()
+    r = build_and_run(ops, num_units=2, d=3, rounds_per_op=11,
+                      decoder=PresetLatencyDecoder(1.0),
+                      make_metrics=lambda e, cl, ch, f: [BacklogTrajectory(ch)],
+                      verbose=False)
+    rows = BacklogTrajectory(r["chip"]).rows()
+    assert len(rows) == 2
+    assert rows[0]["wait"] == rows[1]["wait"] > 0
+
+
+def test_backlog_rounds_use_the_ops_own_cadence():
+    """A per-code round_us override changes how many rounds fit in a wait; the metric
+    must divide by the OP'S cadence, not the chip's global one."""
+    from qecsim.codes import SurfaceCodeModel
+    from qecsim.frontends.circuit import CircuitFrontend
+    from qecsim.message import Operation
+    fast = SurfaceCodeModel(d=3, round_us=0.5)             # != the global 1.1 us
+    ops = CircuitFrontend([
+        Operation(0, "A:T(q0)", (0,), clifford=False),
+        Operation(1, "B:T(q0)", (0,), clifford=False, gated_by=0),
+    ]).build()
+    r = build_and_run(ops, num_units=2, d=3, rounds_per_op=11, code=fast,
+                      decoder=PresetLatencyDecoder(1.0),
+                      make_metrics=lambda e, cl, ch, f: [BacklogTrajectory(ch)],
+                      verbose=False)
+    row = BacklogTrajectory(r["chip"]).rows()[0]
+    assert row["backlog_rounds"] == row["wait"] / us(0.5) + 11
