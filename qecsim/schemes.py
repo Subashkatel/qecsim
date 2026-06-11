@@ -75,6 +75,13 @@ class NaiveOnlineScheme(SlidingWindowScheme):
     scheme). One window per operation; cross-op dependencies still apply (the planner's
     DAG wiring is scheme-independent).
 
+    Do NOT expect it to lose on a single operation's reaction time: one batch has no
+    serial window chain, no t_dd boundary hops, and no buffer-spillover wait, so it can
+    beat the sliding scheme there -- the paper itself prefers batch-without-buffer when
+    affordable (Sec III.C), and d/d sliding windows violate its Eq. 7 once tau_dec >
+    tau_gen/2. The naive scheme's real cost is across a STREAM: decode never overlaps
+    data collection, which is what drives the Fig 10/11 backlog growth.
+
     Inherits data_complete: with buffer_hi = n_rounds there is no overflow, so the
     window is ready exactly when all its own rounds have arrived."""
 
