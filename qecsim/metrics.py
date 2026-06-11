@@ -12,33 +12,46 @@ if TYPE_CHECKING:
 # =====================================================================================
 
 class DecoderUtilization:
-    """CONCRETE EXAMPLE. Time-weighted fraction of decoder units that were busy (0..1). Low
-    utilization means decoders sat idle (over-provisioned or data-starved); near 1 means they
-    are the bottleneck. Integrates the busy level held over each inter-event interval."""
+    """CONCRETE EXAMPLE. Time-weighted fraction of decoder units that were busy (0..1),
+    counted across ALL unit pools (default + strong + ...). Low utilization means decoders
+    sat idle (over-provisioned or data-starved); near 1 means they are the bottleneck.
+    Integrates the busy level held over each inter-event interval."""
     name = "decoder_utilization"
- 
+
     def __init__(self, cluster):
         """Start the busy-time accumulator."""
         self.cluster = cluster
         self._t = 0
         self._busy_area = 0.0
         self._last_busy = 0
- 
+
+    def _units(self) -> tuple:
+        """(busy, total) summed over every unit pool; falls back to the scalar counters
+        for a custom cluster without pools."""
+        totals = getattr(self.cluster, "unit_totals", None)
+        if totals is None:
+            return (self.cluster.num_units - self.cluster.free_units,
+                    self.cluster.num_units)
+        total = sum(totals.values())
+        return total - sum(self.cluster.pool_free.values()), total
+
     def observe(self, engine: "Engine") -> None:
         """Add the busy level held since the last event, then read the current busy level."""
         self._busy_area += self._last_busy * (engine.now - self._t)
         self._t = engine.now
-        self._last_busy = self.cluster.num_units - self.cluster.free_units
- 
+        self._last_busy = self._units()[0]
+
     def result(self) -> float:
-        """Fraction of decoder-unit-time that was busy (0..1)."""
-        return self._busy_area / (self.cluster.num_units * self._t) if self._t else 0.0
+        """Fraction of decoder-unit-time that was busy (0..1), across all pools."""
+        total = self._units()[1]
+        return self._busy_area / (total * self._t) if self._t else 0.0
 
 class ReadyQueueStats:
-    """CONCRETE EXAMPLE. Peak and time-average length of the decoder ready queue how much
-    decode work was waiting. Same time-weighted integration pattern as DecoderUtilization."""
+    """CONCRETE EXAMPLE. Peak and time-average number of decode jobs waiting, counted
+    across ALL pools' ready queues. Same time-weighted integration pattern as
+    DecoderUtilization."""
     name = "ready_queue"
- 
+
     def __init__(self, cluster):
         """Start the queue-length accumulator."""
         self.cluster = cluster
@@ -46,12 +59,19 @@ class ReadyQueueStats:
         self._area = 0.0
         self._last_len = 0
         self.peak = 0
- 
+
+    def _queued(self) -> int:
+        """Jobs waiting across every pool's queue (just the one queue when the cluster
+        has no pools)."""
+        pools = getattr(self.cluster, "pool_ready", None)
+        n = len(self.cluster.ready)
+        return n if pools is None else n + sum(len(q) for q in pools.values())
+
     def observe(self, engine: "Engine") -> None:
         """Accumulate time-weighted queue length and track the peak."""
         self._area += self._last_len * (engine.now - self._t)
         self._t = engine.now
-        self._last_len = len(self.cluster.ready)
+        self._last_len = self._queued()
         self.peak = max(self.peak, self._last_len)
  
     def result(self) -> dict:
