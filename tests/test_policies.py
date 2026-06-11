@@ -87,6 +87,17 @@ def test_switching_decoder_latency_mix():
     assert always.decode(job2).soft_output == 0.0
 
 
+def test_switching_decoder_charges_t_comm_weak_on_every_path():
+    """The paper's T_comm^weak is paid on EVERY decode (weak path included, its backlog
+    recursion has both T_comm terms); default 0 keeps the old latencies exactly."""
+    weak, strong = PresetLatencyDecoder(1.0), PresetLatencyDecoder(10.0)
+    never = SwitchingDecoder(weak, strong, gamma_switch=0.0, t_comm_weak_us=1.1)
+    assert never.latency(DecodeJob(0, 0, 6)) == us(1.1) + us(1.0)
+    always = SwitchingDecoder(weak, strong, gamma_switch=1.0, handoff_us=0.5,
+                              t_comm_weak_us=1.1)
+    assert always.latency(DecodeJob(0, 0, 6)) == us(1.1) + us(1.0) + 2 * us(0.5) + us(10.0)
+
+
 def test_switching_decoder_end_to_end():
     sw = SwitchingDecoder(PresetLatencyDecoder(1.0), PresetLatencyDecoder(10.0),
                           gamma_switch=0.5, seed=7)
