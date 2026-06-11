@@ -65,6 +65,24 @@ class SlidingWindowScheme:
         return True
 
 
+class NaiveOnlineScheme(SlidingWindowScheme):
+    """The NAIVE online decoding of arXiv:2510.25222 Sec III.C (Fig 9): all of an
+    operation's syndrome data is collected first and then decoded COLLECTIVELY, as one
+    batch -- no sliding, no look-ahead buffer. This is the baseline the windowing
+    schemes exist to beat: decoding cannot even start until the last round has arrived,
+    so the reaction wait carries the full batch decode, and a too-slow decoder shows
+    the paper's backlog growth at its starkest (their Fig 10/11 use exactly this
+    scheme). One window per operation; cross-op dependencies still apply (the planner's
+    DAG wiring is scheme-independent).
+
+    Inherits data_complete: with buffer_hi = n_rounds there is no overflow, so the
+    window is ready exactly when all its own rounds have arrived."""
+
+    def plan_windows(self, op_id: int, n_rounds: int, code: CodeModel) -> list[tuple[int, int, int]]:
+        """One batch window: commit every round, look ahead none."""
+        return [(1, n_rounds, n_rounds)]
+
+
 class ParallelWindowScheme(SlidingWindowScheme):
     """The PARALLEL (two-layer) windowing of arXiv:2511.10633 Sec II.4. Windows have "3d
     temporal size" with "three d-sized sub-regions: a buffer region, a commit region, and
