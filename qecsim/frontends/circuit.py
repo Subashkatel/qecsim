@@ -27,16 +27,26 @@ def _wire_circuit(ops: list[Operation],
     patch remembers the most recent op that touched it, and the next op on that patch
     gains it as a predecessor (which is also marked as having a successor). With the
     default one-qubit-per-patch mapping this is exactly the old shared-qubit wiring.
-    Mutates in place and returns. Safe to call again on already-wired ops (idempotent)."""
-    def patch_of(qubit):
-        return qubit if qubit_to_patch is None else qubit_to_patch[qubit]
+    Mutates in place and returns. Re-running is safe: without a mapping, ops that
+    already have patches KEEP them, so a block assignment is never silently erased;
+    pass a mapping to re-assign."""
+    for op in ops:
+        if len(set(op.qubits)) != len(op.qubits):
+            raise ValueError(f"{op.name} lists the same qubit more than once: {op.qubits}")
+    if qubit_to_patch is not None:
+        missing = sorted({q for op in ops for q in op.qubits if q not in qubit_to_patch})
+        if missing:
+            raise ValueError(f"qubit_to_patch has no patch for qubit(s) {missing}")
 
     last_op_on_patch = {}                      # patch -> id of the most recent op that used it
     has_succ = {op.id: False for op in ops}
     preds = {op.id: set() for op in ops}
     for op in ops:                             # ops are in schedule order
-        # dict.fromkeys keeps order and drops repeats (two qubits in one patch -> one patch)
-        op.patches = tuple(dict.fromkeys(patch_of(q) for q in op.qubits))
+        if qubit_to_patch is not None:
+            # dict.fromkeys keeps order and drops repeats (two qubits in one patch -> one patch)
+            op.patches = tuple(dict.fromkeys(qubit_to_patch[q] for q in op.qubits))
+        elif not op.patches:
+            op.patches = tuple(op.qubits)      # default: every qubit is its own patch
         for patch in op.patches:
             if patch in last_op_on_patch:
                 prev = last_op_on_patch[patch]
