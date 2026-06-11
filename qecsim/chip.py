@@ -137,6 +137,9 @@ class Chip:
         different circuit -- so fail loud instead."""
         for q in op.qubits:
             if q in self.busy_qubits:
+                if self.busy_qubits[q] == op.id:
+                    raise RuntimeError(
+                        f"{op.name} lists qubit {q} more than once: {op.qubits}")
                 holder = self.ops[self.busy_qubits[q]].name
                 raise RuntimeError(
                     f"{op.name} and {holder} share qubit {q} but have no dependency "
