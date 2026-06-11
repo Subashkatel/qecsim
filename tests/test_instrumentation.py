@@ -3,8 +3,8 @@
 #==================================================================
 from qecsim.config import us
 from qecsim.decoders import PresetLatencyDecoder
-from qecsim.frontends.circuit import three_cnot_circuit
-from qecsim.metrics import WindowLatencyBreakdown
+from qecsim.frontends.circuit import cnot_plus_two_t_circuit, three_cnot_circuit
+from qecsim.metrics import BacklogTrajectory, WindowLatencyBreakdown
 from qecsim.wiring import build_and_run
 
 
@@ -35,3 +35,45 @@ def test_breakdown_separates_queue_wait_from_dep_block():
                       make_metrics=lambda e, cl, ch, f: [WindowLatencyBreakdown(cl)],
                       verbose=False)
     assert r["metrics"]["window_latency"]["queue_wait"]["max"] > 0
+
+
+# ---- per-gate backlog (the r_i of arXiv:2510.25222) -------------------------------------
+
+def test_backlog_trajectory_measures_the_gated_t_gate():
+    """cnot_plus_two_t has exactly ONE gated gate (the second T waits on the first T's
+    decode): one row, a positive reaction wait, and a backlog of wait-in-rounds plus
+    the gate's own rounds."""
+    r = build_and_run(cnot_plus_two_t_circuit(), num_units=2, d=3, rounds_per_op=11,
+                      decoder=PresetLatencyDecoder(1.0),
+                      make_metrics=lambda e, cl, ch, f: [BacklogTrajectory(ch)],
+                      verbose=False)
+    res = r["metrics"]["backlog_trajectory"]
+    rows = BacklogTrajectory(r["chip"]).rows()
+    assert res["n"] == 1 and len(rows) == 1
+    assert rows[0]["wait"] > 0                              # reaction is never free
+    assert rows[0]["backlog_rounds"] == rows[0]["wait"] / r["chip"].round_ticks + 11
+
+
+def test_backlog_trajectory_registration_changes_nothing():
+    """The metric only reads chip timestamps: a run with it registered produces the
+    byte-identical trace of a run without it."""
+    bare = build_and_run(cnot_plus_two_t_circuit(), num_units=2, d=3, rounds_per_op=11,
+                         decoder=PresetLatencyDecoder(1.0), verbose=False)
+    metered = build_and_run(cnot_plus_two_t_circuit(), num_units=2, d=3, rounds_per_op=11,
+                            decoder=PresetLatencyDecoder(1.0),
+                            make_metrics=lambda e, cl, ch, f: [BacklogTrajectory(ch)],
+                            verbose=False)
+    assert bare["engine"].log_lines == metered["engine"].log_lines
+
+
+def test_backlog_grows_when_the_decoder_is_too_slow():
+    """A slower decoder must show a LARGER reaction wait for the same gated gate --
+    the signal every backlog/divergence study reads off this metric."""
+    waits = {}
+    for lat in (1.0, 50.0):
+        r = build_and_run(cnot_plus_two_t_circuit(), num_units=2, d=3, rounds_per_op=11,
+                          decoder=PresetLatencyDecoder(lat),
+                          make_metrics=lambda e, cl, ch, f: [BacklogTrajectory(ch)],
+                          verbose=False)
+        waits[lat] = r["metrics"]["backlog_trajectory"]["max_wait"]
+    assert waits[50.0] > waits[1.0]
