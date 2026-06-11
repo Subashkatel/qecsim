@@ -66,6 +66,10 @@ class Chip:
         self.started: set[int] = set()
         self.done_bodies: set[int] = set()
         self.gate_released: set[int] = set()       # for non-Clifford gating
+        # reaction-wait timestamps, stamped at events the chip already handles (zero new
+        # events / log lines) -- read by the BacklogTrajectory metric (metrics.py).
+        self.body_done_time: dict[int, int] = {}   # op id -> when its last round fired
+        self.gate_release_time: dict[int, int] = {}  # op id -> when its correction returned
         self.last_finish_time = 0
         # safety bound for the continuous idle-round emitter (a gate that never returns would
         # otherwise schedule forever). The default is generous vs any realistic reaction time,
@@ -200,6 +204,7 @@ class Chip:
     def _body_done(self, op: Operation) -> None:
         """Op's physical work done; start successors and emit idle rounds while a gated successor waits."""
         self.done_bodies.add(op.id)
+        self.body_done_time[op.id] = self.engine.now
         self.last_finish_time = max(self.last_finish_time, self.engine.now)
         self.engine.log("Chip", f"{op.name} BODY DONE")
         for q in op.qubits:
@@ -282,6 +287,7 @@ class Chip:
         state has already arrived (fetched in parallel during the reaction); otherwise it begins
         when the state lands. _maybe_begin enforces the AND of the two conditions."""
         self.gate_released.add(decision.gadget_id)
+        self.gate_release_time[decision.gadget_id] = self.engine.now
         target = self.ops[decision.gadget_id]
         self.engine.log("Chip",
                         f"received basis '{decision.basis}' -> UNBLOCKS {target.name}; trying to start")
