@@ -142,9 +142,11 @@ class BacklogTrajectory:
             if t_gate_open is None:
                 continue                       # released before its gating op ran (never normal)
             wait = t_release - t_gate_open
+            # rounds are counted in the OP'S OWN cadence (a per-code round_us override
+            # changes how many rounds fit in the wait), not the chip's global one
             out.append({"op": op_id, "name": op.name, "released_at": t_release,
                         "wait": wait,
-                        "backlog_rounds": wait / chip.round_ticks
+                        "backlog_rounds": wait / chip._round_ticks_for(op)
                                           + chip.cluster.rounds_for(op)})
         return out
 
