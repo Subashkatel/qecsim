@@ -159,7 +159,8 @@ class DecoderService(Protocol):
     def submit_decode(self, n_rounds: int, on_done: Callable[[], None],
                       label: str = ..., deadline: Optional[int] = ...,
                       code: Optional[str] = ...,
-                      spatial_nodes: Optional[int] = ...) -> None: ...
+                      spatial_nodes: Optional[int] = ...,
+                      hint: Optional[str] = ...) -> None: ...
 
 
 @runtime_checkable
