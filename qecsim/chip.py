@@ -51,7 +51,15 @@ class Chip:
         self.decode_idle_rounds = decode_idle_rounds
  
         self.ops: dict[int, Operation] = {}
-        self.busy_qubits: set = set()
+        # PROGRAM-ORDER RELEASE -- the scheduler. Who runs after who was decided at
+        # compile time: op.predecessors lists the earlier ops that share a qubit with
+        # it (the "trivial rule" of arXiv:2405.17688 -- for lattice surgery the TRUE
+        # constraint). At runtime the chip only counts those down (_release_successors).
+        self._deps_remaining: dict[int, int] = {}    # op id -> predecessor bodies not yet finished
+        self._op_successors: dict[int, list[int]] = {}  # op id -> ops its body-done releases
+        # qubit -> id of the op holding it. A sanity check, NOT the scheduler: starting
+        # ops whenever their qubits look free reorders non-commuting gates. See _mark_qubits_busy.
+        self.busy_qubits: dict[int, int] = {}
         self.requested: set[int] = set()           # ops whose start sequence has begun
         self.state_ready: set[int] = set()         # ops whose magic state is in hand (or none needed)
         self.started: set[int] = set()
@@ -76,43 +84,41 @@ class Chip:
         return us(rt) if rt is not None else self.round_ticks
 
     def load(self, ops: list[Operation]) -> None:
-        """Register all operations, then build the decoder windows."""
+        """Register all operations, build the program-order release counters, then
+        build the decoder windows."""
         for op in ops:
             self.ops[op.id] = op
             self.cluster.register_op(op)
+        for op in ops:
+            self._deps_remaining[op.id] = len(op.predecessors)   # bodies this op waits for
+            self._op_successors[op.id] = []
+        for op in ops:
+            for pred in op.predecessors:
+                self._op_successors[pred].append(op.id)          # pred's body-done releases op
         self.cluster.build_windows()          # cross-op deps need every op registered first
-        self._try_start_all()
- 
+        # release the ROOTS: an op that waits on nobody starts as soon as the workload loads
+        for op in ops:
+            if self._deps_remaining[op.id] == 0:
+                self._attempt_start(op)
+
     # ---- starting operations ------------------------------------------------
-    def _ready_to_attempt(self, op: Operation) -> bool:
-        """True once this op's DATA dependencies are satisfied (its shared qubits are free).
-        The REACTION dependency (a gated gate awaiting a prior decode) is handled separately in
-        _maybe_begin, so the magic-state fetch can be issued concurrently with the reaction --
-        the parallel supply-chain model of arXiv:2411.04270, where states sit pre-distilled in a
-        buffer register rather than being fetched only after the reaction completes."""
-        if op.id in self.started or op.id in self.requested:
-            return False
-        if any(q in self.busy_qubits for q in op.qubits):       # data dependency
-            return False
-        return True
- 
-    def _try_start_all(self) -> None:
-        """Kick off the start sequence for any op whose data dependencies just cleared."""
-        progress = True
-        while progress:
-            progress = False
-            for op in list(self.ops.values()):
-                if self._ready_to_attempt(op):
-                    self._attempt_start(op)
-                    progress = True
- 
+    def _release_successors(self, op: Operation) -> None:
+        """This op's body just finished: every op waiting on it now waits on one fewer
+        body, and any successor left waiting on none starts. Only the finishing op's own
+        successors are touched -- never the whole workload (Kahn's-algorithm release).
+        Only DATA dependencies live here; the two OTHER start conditions -- magic state
+        in hand, and (for a gated gate) the prior decode returned -- are waited on later,
+        in _maybe_begin, so those waits overlap rather than stack (arXiv:2411.04270)."""
+        for succ_id in self._op_successors[op.id]:
+            self._deps_remaining[succ_id] -= 1
+            if self._deps_remaining[succ_id] == 0:
+                self._attempt_start(self.ops[succ_id])
+
     def _attempt_start(self, op: Operation) -> None:
-        # reserve the qubits now so nothing else grabs them while we wait
         """Reserve qubits and fetch the magic state (if any) -- IN PARALLEL with any pending
         reaction. The op physically begins only once BOTH the state is in hand and, if it is a
         gated gate, the prior decode has returned (see _maybe_begin)."""
-        for q in op.qubits:
-            self.busy_qubits.add(q)
+        self._mark_qubits_busy(op)
         self.requested.add(op.id)
         if op.needs_magic_state:
             # Draw a distilled state from the factory supply chain. In the paper's model the
@@ -123,7 +129,21 @@ class Chip:
         else:
             # Clifford ops AND factory-internal non-Clifford preparation need no distilled state.
             self._on_state_ready(op)
- 
+
+    def _mark_qubits_busy(self, op: Operation) -> None:
+        """Mark this op's qubits busy until its body is done. Dependency release guarantees
+        they are free here; a conflict means two ops share a qubit with no ordering edge
+        between them (an unwired op list), and silently picking an order would execute a
+        different circuit -- so fail loud instead."""
+        for q in op.qubits:
+            if q in self.busy_qubits:
+                holder = self.ops[self.busy_qubits[q]].name
+                raise RuntimeError(
+                    f"{op.name} and {holder} share qubit {q} but have no dependency "
+                    f"edge -- the operation list is missing program-order wiring "
+                    f"(run it through _wire_circuit / a frontend)")
+            self.busy_qubits[q] = op.id
+
     def _on_state_ready(self, op: Operation) -> None:
         """The magic state (if any) is in hand; begin if the reaction dependency is met too."""
         self.state_ready.add(op.id)
@@ -176,9 +196,8 @@ class Chip:
         self.last_finish_time = max(self.last_finish_time, self.engine.now)
         self.engine.log("Chip", f"{op.name} BODY DONE")
         for q in op.qubits:
-            self.busy_qubits.discard(q)
-        # try to start anything whose data dependency just cleared
-        self._try_start_all()
+            del self.busy_qubits[q]            # freed FIRST: a successor released below may need them
+        self._release_successors(op)
         # If every operation's body is now physically complete, the QPU has finished all
         # its quantum work. (The decoder may still be draining its window queue.)
         if len(self.done_bodies) == len(self.ops):
@@ -208,12 +227,15 @@ class Chip:
                                  label=f"idle-tick({op.name},1)")
  
     def _has_waiting_gated_successor(self, op_id: int) -> bool:
-        """True while some successor on this op's patch is blocked and not yet released/started."""
-        return any(
-            (op_id in s.predecessors) and (s.gated_by is not None)
-            and (s.id not in self.gate_released) and (s.id not in self.started)
-            for s in self.ops.values()
-        )
+        """True while a successor of this op is still blocked on a decode result: it is
+        gated, its gate has not been released, and it has not started. Checks only this
+        op's own successors, never the whole workload."""
+        for succ_id in self._op_successors[op_id]:
+            succ = self.ops[succ_id]
+            if (succ.gated_by is not None and succ.id not in self.gate_released
+                    and succ.id not in self.started):
+                return True
+        return False
  
     def _emit_idle_round(self, op_id: int, patch, k: int) -> None:
         """Emit idle memory round k for an idling patch, then schedule the next one -- continuing
@@ -249,5 +271,4 @@ class Chip:
         self.engine.log("Chip",
                         f"received basis '{decision.basis}' -> UNBLOCKS {target.name}; trying to start")
         self._maybe_begin(target)      # released op may begin now (state may already be buffered)
-        self._try_start_all()          # and anything whose data deps just cleared
  

@@ -125,7 +125,11 @@ class DecoderCluster:
         # but the plumbing is identical, so a real decoder needs no cluster change -- only
         # a real DeviceModel + Decoder.
         self.payload_store: dict[int, dict[int, dict]] = {}
-        self.peak_payloads = 0                     # peak retained payloads (storage high-water; surfaced in the wiring summary)
+        # syndrome-RAM accounting: a running count kept in step with payload_store
+        # (+1 when a payload is stored, -an op's payloads when its store is freed),
+        # so the high-water mark costs O(1) per round instead of recounting the store.
+        self.payloads_held = 0                     # payloads retained right now
+        self.peak_payloads = 0                     # most ever retained at once (storage high-water)
  
         # the sliding-window plan (built once all ops are loaded)
         self.windows: dict[tuple, Window] = {}
@@ -233,13 +237,13 @@ class DecoderCluster:
         # BACKSTOP for custom controllers that forward fragments individually -- a window
         # must never be assembled from half a round.
         fragments = self.payload_store[op.id].setdefault(payload.round_index, {})
+        if payload.patch_id not in fragments:      # a re-delivered fragment is not new storage
+            self.payloads_held += 1
         fragments[payload.patch_id] = payload
         if len(fragments) >= payload.n_fragments:
             self.rounds_arrived[op.id] = max(self.rounds_arrived[op.id],
                                              payload.round_index)
-        self.peak_payloads = max(self.peak_payloads,
-                                 sum(len(frags) for s in self.payload_store.values()
-                                     for frags in s.values()))
+        self.peak_payloads = max(self.peak_payloads, self.payloads_held)
         self.engine.log("DecoderClstr",
                         f"round {payload.round_index} of {op.name} arrived "
                         f"(op now has rounds 1..{self.rounds_arrived[op.id]})")
@@ -464,7 +468,9 @@ class DecoderCluster:
             # overflowed into this op's early rounds already read them -- that predecessor's last
             # window had to commit before this op's window 0 could (the window dependency). Without
             # this the store grows monotonically and peak_payloads stops being a real high-water.
-            self.payload_store.pop(op_id, None)
+            freed = self.payload_store.pop(op_id, None)
+            if freed is not None:
+                self.payloads_held -= sum(len(frags) for frags in freed.values())
         self._try_dispatch()
         # WORKLOAD COMPLETE: the last window has committed. The cluster does not know about
         # factories or chips -- it just fires the lifecycle callback the wiring installed.
