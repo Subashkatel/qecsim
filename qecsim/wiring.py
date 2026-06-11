@@ -46,6 +46,7 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
                   router: Optional["DecoderRouter"] = None,
                   deadline_policy: Optional["DeadlinePolicy"] = None,
                   decode_idle_rounds: bool = False,
+                  max_idle_rounds: Optional[int] = None,
                   device: Optional[DeviceModel] = None,
                   make_cluster: Optional[Callable] = None,
                   planner: Optional["ExecutionPlanner"] = None,
@@ -132,7 +133,8 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
     else:
         chip = Chip(engine, device, controller, cluster, factory,
                     round_ticks=us(round_us),
-                    code_distance=code.distance, decode_idle_rounds=decode_idle_rounds)
+                    code_distance=code.distance, decode_idle_rounds=decode_idle_rounds,
+                    max_idle_rounds=max_idle_rounds)
     # Dependency inversion: the cluster gets only the callbacks it needs, not the chip object.
     orchestrator.connect(controller, chip.on_decision)  # orchestrator owns the conditional return path
     cluster.on_workload_complete = factory.shutdown    # lifecycle: stop the factory when done
