@@ -51,7 +51,8 @@ class DecoderCluster:
                  rounds_policy: Optional[RoundsPolicy] = None,
                  router: Optional["DecoderRouter"] = None,
                  deadline_policy: Optional["DeadlinePolicy"] = None,
-                 links: Optional[LinkModel] = None):
+                 links: Optional[LinkModel] = None,
+                 unit_pools: Optional[dict] = None):
         """Set up the cluster: decoder units, ready queue, syndrome buffer, bookkeeping.
         `controller` is accepted as part of the construction contract (the make_cluster
         hook signature) but no longer read -- link prices come from `links`."""
@@ -83,8 +84,25 @@ class DecoderCluster:
         # the controller, so the fabric has one source of truth; the default (a flat
         # Table-2 LinkModel) covers direct construction in tests.
         self.links = links if links is not None else LinkModel()
-        self.num_units = num_units
-        self.free_units = num_units
+        # DECODER UNITS. By default one anonymous pool of `num_units` interchangeable
+        # units (the original behavior). `unit_pools` (e.g. {"default": 4, "strong": 1})
+        # splits the cluster into NAMED pools: each pool owns its units AND its own
+        # ready queue, and a job runs on the pool its hint names ("default" otherwise).
+        # A slow strong-decoder job can then neither occupy a weak unit nor make ready
+        # weak windows queue behind it -- the device split of arXiv:2510.25222 Fig 1
+        # (weak = FPGA/ASIC, strong = CPU/GPU). When unit_pools is given it defines ALL
+        # the units and num_units is ignored.
+        if unit_pools is None:
+            unit_pools = {"default": num_units}
+        if "default" not in unit_pools:
+            raise ValueError(f'unit_pools must include a "default" pool '
+                             f'(got {sorted(unit_pools)})')
+        for pool_name, units in unit_pools.items():
+            if units < 1:
+                raise ValueError(f"pool {pool_name!r} needs at least 1 unit (got {units})")
+        self.unit_totals = dict(unit_pools)          # pool -> units it owns
+        self.pool_free = dict(unit_pools)            # pool -> units free right now
+        self.num_units = self.unit_totals["default"]   # back-compat (metrics read it)
         # The QEC code is now a swappable model. Passing code_distance=d (back-compatible)
         # constructs a surface code of that distance, reproducing the original behavior.
         if code is None and layout is None:
@@ -143,7 +161,9 @@ class DecoderCluster:
         self.total_windows = 0
         self._windows_built = False
         self._plan_spatial = None                 # per-op decode sizes from the loaded plan
-        self.ready: list[DecodeJob] = []          # THE ready queue
+        self.ready: list[DecodeJob] = []          # THE ready queue (= the default pool's)
+        self.pool_ready: dict[str, list] = {p: [] for p in self.unit_totals
+                                            if p != "default"}   # other pools' queues
         self.queue_log: list[tuple[int, int]] = []
         # Dependency INVERSION (no back-reference to the chip): the cluster -- the paper's
         # "workload manager" (arXiv:2511.10633 Sec III) -- never reaches into the chip or factory.
@@ -168,6 +188,25 @@ class DecoderCluster:
             # the GATING op's decode result releases this op: its windows sit on the
             # reaction path (used by the DeadlinePolicy to prioritize them).
             self._gating_ops.add(op.gated_by)
+
+    @property
+    def free_units(self) -> int:
+        """Free units in the DEFAULT pool (back-compat; pool_free has every pool)."""
+        return self.pool_free["default"]
+
+    def _pool_for(self, job: DecodeJob) -> str:
+        """The unit pool a job runs on: its hint when that names a pool, else default."""
+        return job.hint if job.hint in self.unit_totals else "default"
+
+    def _queue_for(self, pool: str) -> list:
+        """A pool's ready queue (self.ready IS the default pool's queue)."""
+        return self.ready if pool == "default" else self.pool_ready[pool]
+
+    @staticmethod
+    def _pool_tag(pool: str) -> str:
+        """Log prefix naming the pool -- empty for the default pool, so single-pool
+        traces are unchanged."""
+        return "" if pool == "default" else f"{pool} "
 
     def _decoder_for(self, job: DecodeJob) -> "Decoder":
         """Pick the decoder for a job via the ROUTER. The default CodeRouter routes by
@@ -365,54 +404,64 @@ class DecoderCluster:
                         code=self.layout.code_for_op(op).name,   # G1: route to this code's decoder
                         window=w,                                # commit geometry for boundary defects
                         label=f"{op.name} W{w.k}[commit {w.commit_lo}-{w.commit_hi}]")
-        self.scheduler.insert(self.ready, job)
+        pool = self._pool_for(job)
+        queue = self._queue_for(pool)
+        self.scheduler.insert(queue, job)
         w.queued = True
         self.engine.log("DecoderClstr",
                         f"{op.name} W{w.k} (commit {w.commit_lo}-{w.commit_hi}) READY "
-                        f"-> enqueue (ready-queue length = {len(self.ready)})")
+                        f"-> enqueue ({self._pool_tag(pool)}ready-queue length = {len(queue)})")
         self.queue_log.append((self.engine.now, len(self.ready)))
         self._try_dispatch()
  
     def submit_decode(self, n_rounds: int, on_done: Callable[[], None],
                       label: str = "external", deadline: Optional[int] = None,
                       code: Optional[str] = None,
-                      spatial_nodes: Optional[int] = None) -> None:
+                      spatial_nodes: Optional[int] = None,
+                      hint: Optional[str] = None) -> None:
         """DecodeService entry point: submit a self-contained decode job that competes for
         the SAME decoder units as the core (used by the magic state factory and by the
         chip's idle-round memory decoding). `code` (optional) routes the job to that code's
         decoder; None uses the cluster's default decoder (G1). `spatial_nodes` (optional)
-        sizes the decoding graph for latency models; None lets the decoder use its default."""
+        sizes the decoding graph for latency models; None lets the decoder use its default.
+        `hint` (optional) routes the job to a custom DecoderRouter and, when it names one
+        of the cluster's unit pools, to that pool's units and queue."""
         job = DecodeJob(op_id=-1, window_id=0, n_rounds=n_rounds,
                         ready_time=self.engine.now,
                         deadline=self.engine.now if deadline is None else deadline,
                         on_done=on_done, label=label, code=code,
-                        spatial_nodes=spatial_nodes)
-        self.scheduler.insert(self.ready, job)
+                        spatial_nodes=spatial_nodes, hint=hint)
+        self.scheduler.insert(self._queue_for(self._pool_for(job)), job)
         self.queue_log.append((self.engine.now, len(self.ready)))
         self._try_dispatch()
  
     def _try_dispatch(self) -> None:
-        """While a decoder unit is free, pop the next ready job and run its decode latency."""
-        while self.free_units > 0 and self.ready:
-            job = self.scheduler.pop(self.ready)
-            self.free_units -= 1
-            if job.op_id >= 0:                               # window job: stamp dispatch
-                self.windows[(job.op_id, job.window_id)].t_dispatch = self.engine.now
-            lat = self._decoder_for(job).latency(job)        # routed decoder (G1 / per-job)
-            waited = self.engine.now - job.ready_time
-            self.engine.log("DecoderClstr",
-                            f"START DECODE {job.label} (waited {fmt(waited).strip()} in queue, "
-                            f"units free now {self.free_units})")
-            self.queue_log.append((self.engine.now, len(self.ready)))
-            self.engine.schedule(lat, lambda j=job: self._on_decode_done(j),
-                                 label=f"decode_done({job.label})")
+        """While a pool has a free unit and a ready job, dispatch. Pools are independent:
+        a busy strong pool never blocks the default queue (and vice versa)."""
+        for pool in self.unit_totals:
+            queue = self._queue_for(pool)
+            while self.pool_free[pool] > 0 and queue:
+                job = self.scheduler.pop(queue)
+                job.pool = pool                              # so done() frees THIS pool
+                self.pool_free[pool] -= 1
+                if job.op_id >= 0:                           # window job: stamp dispatch
+                    self.windows[(job.op_id, job.window_id)].t_dispatch = self.engine.now
+                lat = self._decoder_for(job).latency(job)    # routed decoder (G1 / per-job)
+                waited = self.engine.now - job.ready_time
+                self.engine.log("DecoderClstr",
+                                f"START DECODE {job.label} (waited {fmt(waited).strip()} in queue, "
+                                f"{self._pool_tag(pool)}units free now {self.pool_free[pool]})")
+                self.queue_log.append((self.engine.now, len(self.ready)))
+                self.engine.schedule(lat, lambda j=job: self._on_decode_done(j),
+                                     label=f"decode_done({job.label})")
  
     def _on_decode_done(self, job: DecodeJob) -> None:
         """Commit a finished window, hand its boundary to the next window, report the op result on its last window."""
-        self.free_units += 1
+        self.pool_free[job.pool] += 1
         if job.on_done is not None:                  # factory correction-qubit job
             self.engine.log("DecoderClstr",
-                            f"DECODE DONE {job.label} (units free now {self.free_units})")
+                            f"DECODE DONE {job.label} ({self._pool_tag(job.pool)}units "
+                            f"free now {self.pool_free[job.pool]})")
             job.on_done()
             self._try_dispatch()
             return
@@ -433,7 +482,8 @@ class DecoderCluster:
         self._committed_per_op[op_id] = self._committed_per_op.get(op_id, 0) + 1
         self.engine.log("DecoderClstr",
                         f"DECODE DONE {op.name} W{w.k}: rounds {w.commit_lo}-{w.commit_hi} "
-                        f"committed (units free now {self.free_units})")
+                        f"committed ({self._pool_tag(job.pool)}units free now "
+                        f"{self.pool_free[job.pool]})")
         # run the actual decode and KEEP its result. For a real decoder this is a genuine
         # logical value; for a timing-only stub it is None and the orchestrator falls back
         # to its toy outcome. Per-operation windows are combined (parity) into one outcome.
