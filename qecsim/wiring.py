@@ -47,6 +47,7 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
                   deadline_policy: Optional["DeadlinePolicy"] = None,
                   decode_idle_rounds: bool = False,
                   max_idle_rounds: Optional[int] = None,
+                  unit_pools: Optional[dict] = None,
                   device: Optional[DeviceModel] = None,
                   make_cluster: Optional[Callable] = None,
                   planner: Optional["ExecutionPlanner"] = None,
@@ -112,7 +113,8 @@ def build_and_run(ops: Optional[list[Operation]] = None, num_units: Optional[int
                                  num_units=num_units, rounds_per_op=rounds_per_op, code=code,
                                  scheme=scheme, layout=layout, decoders=decoders,
                                  rounds_policy=rounds_policy, router=router,
-                                 deadline_policy=deadline_policy, links=links)
+                                 deadline_policy=deadline_policy, links=links,
+                                 unit_pools=unit_pools)
 
     # FACTORY seam: an explicit factory, or a make_factory(engine, cluster) hook for
     # factories that must route their correction decodes through THIS cluster (the
