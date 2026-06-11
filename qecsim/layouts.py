@@ -33,8 +33,9 @@ class UniformLayout:
         return self.code
  
     def spatial_nodes_for(self, op: Operation) -> int:
-        # identical to the original cluster computation: one code, all patches together.
-        return self.code.spatial_nodes(len(op.qubits))
+        # decode-graph size scales with the op's patches (qubits if never wired)
+        num_patches = len(op.patches) if op.patches else len(op.qubits)
+        return self.code.spatial_nodes(num_patches)
  
     def codes(self) -> list:
         return [self.code]

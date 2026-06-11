@@ -14,24 +14,35 @@ from ..message import Operation
 # independent T gates) built from Operation objects. The shared gate list 
 # and classification logic is here too
 # ===========================================================================
-def _wire_circuit(ops: list[Operation]) -> list[Operation]:
-    """Fill in each operation's patches / predecessors / has_successor from shared qubits.
+def _wire_circuit(ops: list[Operation],
+                  qubit_to_patch: Optional[dict] = None) -> list[Operation]:
+    """Fill in each operation's patches / predecessors / has_successor.
 
-    `ops` is in schedule order. Walking it once, for each qubit we remember the id of the most
-    recent op that touched it; the next op on that qubit gains that previous one as a predecessor
-    (and the previous one is marked as having a successor). Mutates in place and returns. Safe to
-    call again on already-wired ops (idempotent)."""
-    last_op_on_qubit = {}                      # qubit -> id of the most recent op that used it
+    A PATCH is the hardware region the decoder watches as one picture. By default every
+    logical qubit is its own patch (the surface-code picture); `qubit_to_patch` says
+    otherwise -- e.g. for a block code where qubits 0..11 all live in patch 0.
+
+    `ops` is in schedule order. A patch can only do one operation at a time, so two ops
+    touching the same patch must keep their program order: walking the list once, each
+    patch remembers the most recent op that touched it, and the next op on that patch
+    gains it as a predecessor (which is also marked as having a successor). With the
+    default one-qubit-per-patch mapping this is exactly the old shared-qubit wiring.
+    Mutates in place and returns. Safe to call again on already-wired ops (idempotent)."""
+    def patch_of(qubit):
+        return qubit if qubit_to_patch is None else qubit_to_patch[qubit]
+
+    last_op_on_patch = {}                      # patch -> id of the most recent op that used it
     has_succ = {op.id: False for op in ops}
     preds = {op.id: set() for op in ops}
     for op in ops:                             # ops are in schedule order
-        op.patches = tuple(op.qubits)          # one patch per qubit (default geometry)
-        for q in op.qubits:
-            if q in last_op_on_qubit:
-                prev = last_op_on_qubit[q]
+        # dict.fromkeys keeps order and drops repeats (two qubits in one patch -> one patch)
+        op.patches = tuple(dict.fromkeys(patch_of(q) for q in op.qubits))
+        for patch in op.patches:
+            if patch in last_op_on_patch:
+                prev = last_op_on_patch[patch]
                 preds[op.id].add(prev)
                 has_succ[prev] = True
-            last_op_on_qubit[q] = op.id
+            last_op_on_patch[patch] = op.id
     for op in ops:
         op.predecessors = tuple(sorted(preds[op.id]))
         op.has_successor = has_succ[op.id]
@@ -95,13 +106,15 @@ class CircuitFrontend:
     """The simplest InputFrontend: a thin wrapper around a Python-built operation list (e.g.
     three_cnot_circuit()), so the input is a swappable object rather than a hardcoded argument.
     SurgeryIRFrontend implements the same build() contract (OpenQASM support is a TODO)."""
-    def __init__(self, ops: list[Operation]):
-        """Hold a prebuilt operation list."""
+    def __init__(self, ops: list[Operation], qubit_to_patch: Optional[dict] = None):
+        """Hold a prebuilt operation list, and optionally which patch each qubit lives in
+        (default: every qubit is its own patch -- see _wire_circuit)."""
         self.ops = ops
+        self.qubit_to_patch = qubit_to_patch
 
     def build(self) -> list[Operation]:
         """Return the operations (already wired; _wire_circuit is idempotent)."""
-        return _wire_circuit(self.ops)
+        return _wire_circuit(self.ops, self.qubit_to_patch)
 
 
 # The single source of truth for Clifford-ness. Extend a set to teach EVERY frontend a gate.
@@ -167,7 +180,8 @@ def _gate_is_clifford(mnemonic: str, angle: Optional[str] = None) -> bool:
                      f"NON_CLIFFORD_GATES / ROTATION_GATES / GENERAL_UNITARY_GATES")
 
 
-def _ops_from_gatelist(gatelist: list) -> list[Operation]:
+def _ops_from_gatelist(gatelist: list,
+                       qubit_to_patch: Optional[dict] = None) -> list[Operation]:
     """Shared lowering used by every text frontend: turn a parsed gate list into a wired
     operation DAG. Each entry is (mnemonic, qubit-tuple, is_clifford, gated_by). This is the
     one place Operation objects are built and `_wire_circuit` is applied, so each format stays
@@ -177,7 +191,7 @@ def _ops_from_gatelist(gatelist: list) -> list[Operation]:
         qstr = ",".join("q" + str(q) for q in qubits)
         ops.append(Operation(i, f"Op{i}:{mnemonic.upper()}({qstr})", tuple(qubits),
                              clifford=clifford, gated_by=gated_by))
-    return _wire_circuit(ops)
+    return _wire_circuit(ops, qubit_to_patch)
 
 
 class SurgeryIRFrontend:
@@ -192,9 +206,11 @@ class SurgeryIRFrontend:
 
     Implements build() -> list[Operation]. Unlike OpenQASM, this IR can express `gated_by`
     (the decode-feedback dependency)."""
-    def __init__(self, text: str):
-        """Hold the IR source text."""
+    def __init__(self, text: str, qubit_to_patch: Optional[dict] = None):
+        """Hold the IR source text, and optionally which patch each qubit lives in
+        (default: every qubit is its own patch -- see _wire_circuit)."""
         self.text = text
+        self.qubit_to_patch = qubit_to_patch
 
     def build(self) -> list[Operation]:
         """Parse the IR into the shared gate list, then lower it to the wired operation DAG."""
@@ -212,7 +228,7 @@ class SurgeryIRFrontend:
                 tok = tok[:gi]
             qubits = tuple(int(t[1:]) for t in tok[1:] if t.lower().startswith("q"))
             gatelist.append((mnemonic, qubits, _gate_is_clifford(mnemonic), gated_by))
-        return _ops_from_gatelist(gatelist)
+        return _ops_from_gatelist(gatelist, self.qubit_to_patch)
 
 
 # ===========================================================================
