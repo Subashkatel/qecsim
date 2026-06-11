@@ -108,3 +108,30 @@ def test_pools_with_deadline_scheduler_complete_and_conserve():
     engine.run()
     assert len(done) == 12
     assert cluster.pool_free == cluster.unit_totals
+
+
+def test_metrics_see_every_pool():
+    """Utilization and queue depth must count ALL pools: with traffic ONLY on the
+    strong pool, a default-pool-only metric would read 0.0 / 0 (the blind spot this
+    test pins down)."""
+    from qecsim.metrics import DecoderUtilization, ReadyQueueStats
+    engine = Engine(verbose=False)
+    cluster = DecoderCluster(engine, PresetLatencyDecoder(10.0), FifoScheduler(),
+                             None, None, num_units=1, code_distance=3,
+                             unit_pools={"default": 1, "strong": 1})
+    util, queue = DecoderUtilization(cluster), ReadyQueueStats(cluster)
+    engine.add_metric(util)
+    engine.add_metric(queue)
+    for i in range(4):                  # 4 back-to-back 10us jobs on the one strong unit
+        cluster.submit_decode(6, lambda: None, label=f"s{i}", hint="strong")
+    engine.run()
+    # 1 of 2 units busy across the run's decode-done events. The first 10us fall
+    # BEFORE the first engine event (the job dispatched from the direct submit call,
+    # not inside an event), and this observe-after-event metric pattern cannot see
+    # busy time before the first event: 30us busy / (2 units * 40us) = 0.375.
+    assert util.result() == 0.375
+    # same pattern for the queue: depth 3 existed only before the first event, so
+    # the metric's first sample (after decode-done #1) sees 2 ...
+    assert queue.result()["peak"] == 2
+    # ... while the cluster's own queue_log records AT SUBMIT TIME and saw all 3.
+    assert max(q for _, q in cluster.queue_log) == 3
