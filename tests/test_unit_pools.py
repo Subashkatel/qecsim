@@ -73,3 +73,38 @@ def test_pool_validation_fails_loudly():
     with pytest.raises(ValueError, match="at least 1 unit"):
         DecoderCluster(*args, num_units=1, code_distance=3,
                        unit_pools={"default": 1, "strong": 0})
+
+
+def test_units_conserved_when_a_decoder_mutates_the_hint_mid_flight():
+    """SwitchingDecoder sets job.hint='strong' DURING latency() -- after the job already
+    dispatched on the default pool. The done-path must free the pool the job actually
+    ran on (job.pool), not the pool its mutated hint now names."""
+    from qecsim.decoders import SwitchingDecoder
+    for seed in range(5):
+        sw = SwitchingDecoder(PresetLatencyDecoder(1.0), PresetLatencyDecoder(10.0),
+                              gamma_switch=0.5, seed=seed)
+        r = build_and_run(cnot_plus_two_t_circuit(), d=3, rounds_per_op=11, decoder=sw,
+                          unit_pools={"default": 2, "strong": 1}, verbose=False)
+        cluster = r["cluster"]
+        assert cluster.pool_free == cluster.unit_totals, \
+            f"seed {seed}: a unit leaked into the wrong pool"
+
+
+def test_pools_with_deadline_scheduler_complete_and_conserve():
+    """EDF sorts each pool's queue independently; every job finishes and every pool's
+    units all come back."""
+    from qecsim.schedulers import EarliestDeadlineScheduler
+    engine = Engine(verbose=False)
+    cluster = DecoderCluster(engine, PresetLatencyDecoder(7.0),
+                             EarliestDeadlineScheduler(), None, None,
+                             num_units=1, code_distance=3,
+                             unit_pools={"default": 2, "strong": 2})
+    done = []
+    for i in range(6):
+        cluster.submit_decode(6, lambda i=i: done.append(i), label=f"s{i}",
+                              hint="strong", deadline=us(100 - i))
+        cluster.submit_decode(6, lambda i=i: done.append(i + 10), label=f"d{i}",
+                              deadline=us(100 - i))
+    engine.run()
+    assert len(done) == 12
+    assert cluster.pool_free == cluster.unit_totals
