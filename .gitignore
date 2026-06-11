@@ -28,3 +28,7 @@ env/
 .ruff_cache/
 .DS_Store
 Thumbs.db
+
+# Local research notes and experiment scripts
+docs/
+tools/
