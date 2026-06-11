@@ -109,6 +109,59 @@ class WindowLatencyBreakdown:
                     "max": max(r[s] for r in rows), "n": len(rows)} for s in stages}
 
 
+class BacklogTrajectory:
+    """Per-gate backlog -- the r_i of the decoder-switching paper (arXiv:2510.25222
+    Sec III.C, Fig 9). For every gated operation it records the REACTION WAIT (from the
+    gating operation's last physical round to the correction's return) and that wait
+    expressed as accumulated syndrome rounds plus the gate's own rounds: the rounds the
+    decoder must absorb between consecutive feedback decisions. A decoder that cannot
+    keep up shows r_i GROWING with the gate index; a stable one converges.
+
+    Reads timestamps the chip stamps at events it already handles (body_done_time,
+    gate_release_time), so registering it never changes the trace or the timing --
+    the same pattern as WindowLatencyBreakdown."""
+    name = "backlog_trajectory"
+
+    def __init__(self, chip):
+        """Hold the chip whose timestamps we read."""
+        self.chip = chip
+
+    def observe(self, engine: "Engine") -> None:
+        """Nothing to sample (event-driven; the chip stamps the timestamps)."""
+        pass
+
+    def rows(self) -> list:
+        """One record per released gate, in release order: the reaction wait (ticks)
+        and the backlog in rounds (wait / round time + the gate's own rounds)."""
+        chip = self.chip
+        out = []
+        for op_id, t_release in sorted(chip.gate_release_time.items(),
+                                       key=lambda kv: kv[1]):
+            op = chip.ops[op_id]
+            t_gate_open = chip.body_done_time.get(op.gated_by)
+            if t_gate_open is None:
+                continue                       # released before its gating op ran (never normal)
+            wait = t_release - t_gate_open
+            out.append({"op": op_id, "name": op.name, "released_at": t_release,
+                        "wait": wait,
+                        "backlog_rounds": wait / chip.round_ticks
+                                          + chip.cluster.rounds_for(op)})
+        return out
+
+    def result(self) -> dict:
+        """Summary over all released gates: count, mean/max wait, mean/max backlog."""
+        rows = self.rows()
+        if not rows:
+            return {"n": 0, "mean_wait": 0.0, "max_wait": 0,
+                    "mean_backlog_rounds": 0.0, "max_backlog_rounds": 0.0}
+        waits = [r["wait"] for r in rows]
+        backlog = [r["backlog_rounds"] for r in rows]
+        return {"n": len(rows),
+                "mean_wait": sum(waits) / len(waits), "max_wait": max(waits),
+                "mean_backlog_rounds": sum(backlog) / len(backlog),
+                "max_backlog_rounds": max(backlog)}
+
+
 class MagicStateLatency:
     """Production-side magic-state latency, from the factory's per-state StateTrace
     records (DistillationFactory): how long a state takes under a given production
