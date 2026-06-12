@@ -29,7 +29,8 @@ class Chip:
                  cluster: WorkloadManager, factory: MagicStateFactory,
                  round_ticks: int, code_distance: int,
                  decode_idle_rounds: bool = False,
-                 max_idle_rounds: Optional[int] = None):
+                 max_idle_rounds: Optional[int] = None,
+                 gates_start_on_round_boundaries: bool = False):
         """Wire the chip to its device, controller, cluster, and factory; set the round cadence.
         Each operation's temporal length is NOT a chip parameter: it comes from
         cluster.rounds_for(op) (the ROUNDS policy), so the chip can never disagree with
@@ -74,6 +75,15 @@ class Chip:
         # to begin on the patch consumes them (cluster.prepend_idle_rounds): a patch's
         # idle stretch belongs to the decode stream of whatever runs on it next.
         self.idle_rounds_by_patch: dict = {}
+        # ROUND-GRID start discipline (off by default = the original immediate start).
+        # Real devices measure stabilizers on a fixed cadence, so a gate released
+        # mid-round begins at the NEXT round boundary and the idle stream runs
+        # contiguously up to it -- the strict (ceiling) discretization of
+        # arXiv:2510.25222 Eq. 5, and how SWIPER-SIM models time (round granularity).
+        # Convention: a release landing exactly ON a boundary still starts at the
+        # following one (the correction must precede the round it affects).
+        self.gates_start_on_round_boundaries = gates_start_on_round_boundaries
+        self._patches_emitting: set = set()        # patches with an active idle emitter
         self.last_finish_time = 0
         # safety bound for the continuous idle-round emitter (a gate that never returns would
         # otherwise schedule forever). The default is generous vs any realistic reaction time,
@@ -172,7 +182,18 @@ class Chip:
             return
         if op.gated_by is not None and op.id not in self.gate_released:
             return                                              # reaction outcome not back yet
+        if self._must_wait_for_round_boundary(op):
+            return                       # the patch's idle emitter starts it on its next tick
         self._begin(op)
+
+    def _must_wait_for_round_boundary(self, op: Operation) -> bool:
+        """Under gates_start_on_round_boundaries, a gate whose patch is mid-round (its
+        idle emitter still ticking) begins at the next round boundary, so the patch's
+        syndrome stream stays on one grid."""
+        if not self.gates_start_on_round_boundaries:
+            return False
+        patch = op.patches[0] if op.patches else (op.qubits[0] if op.qubits else 0)
+        return patch in self._patches_emitting
  
     def _begin(self, op: Operation) -> None:
         """Run an operation's syndrome rounds, then mark its body done."""
@@ -246,28 +267,38 @@ class Chip:
                             f"{op.name} patch idles (successor gated on a decode); "
                             f"emitting memory rounds every round until the correction returns")
             patch = op.patches[0] if op.patches else (op.qubits[0] if op.qubits else 0)
+            self._patches_emitting.add(patch)
             self.engine.schedule(self._round_ticks_for_patch(patch),
                                  lambda oid=op.id, pt=patch: self._emit_idle_round(oid, pt, 1),
                                  label=f"idle-tick({op.name},1)")
  
     def _has_waiting_gated_successor(self, op_id: int) -> bool:
         """True while a successor of this op is still blocked on a decode result: it is
-        gated, its gate has not been released, and it has not started. Checks only this
-        op's own successors, never the whole workload."""
+        gated, its gate has not been released, and it has not started. Under the
+        round-grid start discipline a RELEASED-but-unstarted successor also counts --
+        the patch keeps measuring until the gate actually begins (at the boundary).
+        Checks only this op's own successors, never the whole workload."""
         for succ_id in self._op_successors[op_id]:
             succ = self.ops[succ_id]
-            if (succ.gated_by is not None and succ.id not in self.gate_released
-                    and succ.id not in self.started):
+            if succ.gated_by is None or succ.id in self.started:
+                continue
+            if succ.id not in self.gate_released:
                 return True
+            if self.gates_start_on_round_boundaries:
+                return True               # released; its start waits for this emitter's tick
         return False
  
     def _emit_idle_round(self, op_id: int, patch, k: int) -> None:
         """Emit idle memory round k for an idling patch, then schedule the next one -- continuing
         every round until the gated successor is released (or has started), modelling a QPU that
-        keeps measuring stabilizers while it waits in storage. Self-terminating + capped."""
+        keeps measuring stabilizers while it waits in storage. Self-terminating + capped.
+        Under the round-grid start discipline, a successor that was released mid-round
+        BEGINS HERE, right after this boundary's idle round, keeping the stream contiguous."""
         if not self._has_waiting_gated_successor(op_id):
+            self._patches_emitting.discard(patch)
             return                                          # gate returned (or started): stop
         if k > self.max_idle_rounds:
+            self._patches_emitting.discard(patch)
             self.engine.log("Chip",
                             f"WARNING: {self.ops[op_id].name} hit the idle-round cap "
                             f"(max_idle_rounds={self.max_idle_rounds}) with its gated "
@@ -279,6 +310,16 @@ class Chip:
             SyndromePayload(op_id, patch, k),
             lambda p, o=op_id: self.cluster.on_memory_round(o))
         self.idle_rounds_by_patch[patch] = self.idle_rounds_by_patch.get(patch, 0) + 1
+        if self.gates_start_on_round_boundaries:
+            # this tick IS a round boundary: any successor whose release and magic
+            # state both arrived mid-round starts now, contiguous with the stream
+            for succ_id in self._op_successors[op_id]:
+                succ = self.ops[succ_id]
+                if (succ.gated_by is not None and succ.id not in self.started
+                        and succ.id in self.gate_released
+                        and succ.id in self.state_ready):
+                    self._patches_emitting.discard(patch)
+                    self._begin(succ)
         if self.decode_idle_rounds:
             # every commit-region's worth of idle rounds becomes one memory-window decode
             # job (commit + buffer rounds), sized to this patch's code -- the decoder load
