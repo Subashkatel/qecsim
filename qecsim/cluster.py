@@ -158,6 +158,8 @@ class DecoderCluster:
         self._committed_per_op: dict[int, int] = {}   # committed-window count per op
         self._gating_ops: set[int] = set()            # ops whose result gates a successor
         self.op_results: dict[int, int] = {}      # accumulated logical value per op (real decoders)
+        self.window_models: dict = {}             # (op_id, k) -> WindowErrorModel, built at plan load
+        #                                           for ops that carry a stim circuit (real decoding)
         self.total_windows = 0
         self._windows_built = False
         self._plan_spatial = None                 # per-op decode sizes from the loaded plan
@@ -255,6 +257,42 @@ class DecoderCluster:
                         f"{plan.summary.get('rounds_per_op', '?')} rounds/op -> "
                         f"{plan.nwin.get(next(iter(self.ops), 0), 0)} "
                         f"windows per operation, {plan.total_windows} windows total")
+        self._build_window_error_models()
+
+    def _build_window_error_models(self) -> None:
+        """For every op that carries a stim circuit, slice its detector error model into
+        per-window WindowErrorModels and file them by window key -- compile-time data
+        (zero simulated ticks), attached to each window's DecodeJob as job.dem so a real
+        decoder has its decoding problem (docs/DESIGN-real-window-decoding.md, phase R2).
+
+        Round convention shared with StimDevice: chip round r holds stim layer t = r - 1,
+        layers past the chip's last round fold into the last round (round = min(t+1, R)),
+        so a window's concatenated payload bits equal its model's rows exactly.
+
+        Scope (documented limits, loud where it matters): windows with a LEADING buffer
+        (the parallel A/B scheme) are skipped -- their jobs keep dem=None and decode as
+        timing-only, as before. Idle-round growth (the naive scheme's
+        prepend_idle_rounds) happens after planning; those ops are skipped too since
+        their window geometry no longer matches the circuit."""
+        for op_id, op in self.ops.items():
+            if op.circuit is None:
+                continue
+            keys = [(op_id, k) for k in self.op_windows.get(op_id, [])]
+            wins = [self.windows[key] for key in keys]
+            if not wins or any(w.buffer_lo not in (None, w.commit_lo) for w in wins):
+                continue                       # A/B leading buffers: timing-only for now
+            from .adapters.window_error_models import build_window_error_models
+            R = self.rounds_for(op)
+            coords = op.circuit.get_detector_coordinates()
+            folded = {det: min(int(c[-1]) + 1, R) for det, c in coords.items()}
+            plan = [(w.commit_lo, w.commit_hi, min(w.buffer_hi, R)) for w in wins]
+            models = build_window_error_models(op.circuit, plan,
+                                               detector_rounds=folded)
+            for key, model in zip(keys, models):
+                self.window_models[key] = model
+            self.engine.log("DecoderClstr",
+                            f"{op.name}: built {len(models)} window error models "
+                            f"({sum(m.check.shape[1] for m in models)} fault columns)")
  
     def build_windows(self) -> None:
         """Back-compat entry: if no execution plan has been loaded yet, build one in place
@@ -426,6 +464,7 @@ class DecoderCluster:
                         ready_time=self.engine.now, deadline=deadline,
                         spatial_nodes=self._spatial_nodes(op),
                         payloads=self._assemble_payloads(w),
+                        dem=self.window_models.get(key),         # this window's decoding problem (R2)
                         code=self.layout.code_for_op(op).name,   # G1: route to this code's decoder
                         window=w,                                # commit geometry for boundary defects
                         label=f"{op.name} W{w.k}[commit {w.commit_lo}-{w.commit_hi}]")
