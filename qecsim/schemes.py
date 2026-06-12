@@ -83,7 +83,18 @@ class NaiveOnlineScheme(SlidingWindowScheme):
     data collection, which is what drives the Fig 10/11 backlog growth.
 
     Inherits data_complete: with buffer_hi = n_rounds there is no overflow, so the
-    window is ready exactly when all its own rounds have arrived."""
+    window is ready exactly when all its own rounds have arrived.
+
+    `batches_idle_rounds_into_next_op`: under this scheme a batch is the whole
+    feedback-to-feedback SEGMENT -- the rounds a patch idled before the gate plus the
+    gate's own rounds (the r_i of Eq. 5; Terhal's backlog argument: the record
+    generated while waiting "needs to have been processed" before the next feedback).
+    The cluster reads this flag in prepend_idle_rounds; continuously-windowed schemes
+    leave it False and decode idle stretches concurrently instead (see
+    docs/DESIGN-idle-stream-windows.md for why merging is exactly what makes this
+    scheme reproduce Eq. 5 and concurrent windows would not)."""
+
+    batches_idle_rounds_into_next_op = True
 
     def plan_windows(self, op_id: int, n_rounds: int, code: CodeModel) -> list[tuple[int, int, int]]:
         """One batch window: commit every round, look ahead none."""
