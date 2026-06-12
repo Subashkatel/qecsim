@@ -5,21 +5,38 @@ from typing import Optional
 
 # =====================================================================================
 # PER-WINDOW DECODING PROBLEMS (gap #7)
-# Slices ONE global detector error model into the decoding problem of each window --
-# never per-window circuits. Construction and conventions are multi-source verified
-# (docs/DESIGN-real-window-decoding.md):
+#
+# A decoder needs two inputs: the measured detector
+# bits (which arrive shot by shot) and the ERROR MODEL -- the catalog of everything
+# that can go wrong, listing for each fault which detectors it flips, how likely it
+# is, and whether it flips the logical answer. stim computes that catalog ONCE for
+# the whole circuit (the detector error model, DEM). Windowed decoding never builds
+# per-window circuits; it slices the one global catalog into per-window pieces.
+# A WindowErrorModel is one such piece: the prepared reference sheet a decoder needs
+# to solve window k. It is pure compile-time data -- built before any shot exists,
+# shared by every shot; only the detector bits change per shot.
+#
+# The slicing rules are multi-source verified (docs/DESIGN-real-window-decoding.md,
+# incl. the 8-source architecture cross-check in its section 2b):
 #   - row-slice the global DEM by detector rounds (Tan arXiv:2209.09219; QUITS
 #     spacetime(); Huang & Puri arXiv:2311.03307)
 #   - a fault is OWNED (committed) by the FIRST window whose commit region it touches
 #     (Skoric arXiv:2209.08552's commit-the-crossing-edges rule; QUITS's advancing
-#     column cursor); the last window owns everything left (the experiment's true
-#     closing time boundary)
+#     column cursor; Bombin arXiv:2303.04846's disjoint commit-region partition);
+#     the last window owns everything left (the experiment's true closing boundary).
+#     Ownership is what guarantees every fault is decided exactly once.
 #   - interior window time boundaries are OPEN: a fault whose other detector was cut
 #     out of the slice becomes a single-detector column = a boundary edge (Tan's
 #     imaginary detectors, mechanically free here)
 #   - a committed fault's detector flips BEYOND the commit region are the artificial
 #     defects handed forward (Skoric; Huang & Puri's sigma' = sigma + H*xi; QUITS's
-#     window_update)
+#     window_update) -- the note telling the next window "already explained, ignore"
+#
+# The slice is CODE-AGNOSTIC: the same construction serves the surface code and
+# qLDPC / bivariate-bicycle codes (QUITS validates it for qLDPC). Only the inner
+# decoder differs: matching_window_decoder() (PyMatching) for matchable codes, built
+# with decompose_errors=True; bposd_window_decoder() (ldpc BP-OSD) for BB/qLDPC,
+# built with decompose_errors=False since their faults may flip >2 detectors.
 # =====================================================================================
 
 
@@ -76,20 +93,38 @@ def detector_error_model_to_faults(dem) -> tuple:
 
 
 def build_window_error_models(circuit, plan: list, num_observables: Optional[int] = None,
-                          ) -> list:
+                          *, decompose_errors: bool = True,
+                          detector_rounds: Optional[dict] = None) -> list:
     """Slice an operation's circuit into one WindowErrorModel per planned window.
 
     `plan` is scheme-style: [(commit_lo, commit_hi, buffer_hi), ...] in 1-based rounds,
     where round r covers the detectors with stim time coordinate t = r - 1. Detectors
     past the last window's buffer (the final data-measurement layer) join the LAST
     window -- the experiment's true closing time boundary (QUITS's special last
-    window; Tan's closed final boundary)."""
+    window; Tan's closed final boundary).
+
+    `decompose_errors` mirrors stim's flag: True (default) splits faults into the
+    <= 2-detector components matching decoders require (surface code); False keeps
+    whole faults for codes whose DEM is not graphlike (BB / qLDPC -- pair with
+    bposd_window_decoder, since matching does not apply).
+
+    `detector_rounds` maps global detector id -> 1-based round, for circuits whose
+    detectors carry no time coordinates (e.g. QUITS-built BB circuits, where
+    round = id // checks_per_round + 1). Default reads stim coordinates (t + 1)."""
     import numpy as np
-    dem = circuit.detector_error_model(decompose_errors=True)
+    dem = circuit.detector_error_model(decompose_errors=decompose_errors)
     det_sets, obs_sets, priors = detector_error_model_to_faults(dem)
     n_obs = num_observables if num_observables is not None else circuit.num_observables
-    round_of = {det: int(c[-1]) + 1 for det, c in
-                circuit.get_detector_coordinates().items()}
+    if detector_rounds is not None:
+        round_of = dict(detector_rounds)
+    else:
+        coords = circuit.get_detector_coordinates()
+        coordless = sum(1 for c in coords.values() if not c)
+        if coordless:
+            raise ValueError(
+                f"{coordless} detectors carry no coordinates; pass detector_rounds "
+                "(global detector id -> 1-based round) explicitly")
+        round_of = {det: int(c[-1]) + 1 for det, c in coords.items()}
     fault_rounds = [tuple(round_of[d] for d in dets) for dets in det_sets]
 
     models: list = []
@@ -178,5 +213,31 @@ def matching_window_decoder():
             m = pymatching.Matching.from_check_matrix(model.check, weights=weights)
             cache[id(model)] = m
         return m.decode(syndrome)
+
+    return decode
+
+
+def bposd_window_decoder(max_iter: int = 2, osd_order: int = 0,
+                         bp_method: str = "product_sum", schedule: str = "serial",
+                         osd_method: str = "osd_cs"):
+    """A BP-OSD inner decoder for decode_windowed -- BB / qLDPC windows, whose faults
+    may flip > 2 detectors (build the models with decompose_errors=False; matching
+    does not apply). Defaults follow QUITS's sliding_window_bposd_* functions.
+    Caches one ldpc.BpOsdDecoder per WindowErrorModel (matrices are shot-independent;
+    only the syndrome changes per shot)."""
+    cache: dict = {}
+
+    def decode(model: WindowErrorModel, syndrome):
+        d = cache.get(id(model))
+        if d is None:
+            from ldpc import BpOsdDecoder
+            from scipy.sparse import csr_matrix
+            d = BpOsdDecoder(csr_matrix(model.check),
+                             error_channel=list(model.priors),
+                             max_iter=max_iter, bp_method=bp_method,
+                             schedule=schedule, osd_method=osd_method,
+                             osd_order=osd_order)
+            cache[id(model)] = d
+        return d.decode(syndrome)
 
     return decode
