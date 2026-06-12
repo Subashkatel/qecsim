@@ -70,6 +70,10 @@ class Chip:
         # events / log lines) -- read by the BacklogTrajectory metric (metrics.py).
         self.body_done_time: dict[int, int] = {}   # op id -> when its last round fired
         self.gate_release_time: dict[int, int] = {}  # op id -> when its correction returned
+        # idle rounds accumulated per PATCH while a gated successor waited; the NEXT op
+        # to begin on the patch consumes them (cluster.prepend_idle_rounds): a patch's
+        # idle stretch belongs to the decode stream of whatever runs on it next.
+        self.idle_rounds_by_patch: dict = {}
         self.last_finish_time = 0
         # safety bound for the continuous idle-round emitter (a gate that never returns would
         # otherwise schedule forever). The default is generous vs any realistic reaction time,
@@ -173,6 +177,14 @@ class Chip:
     def _begin(self, op: Operation) -> None:
         """Run an operation's syndrome rounds, then mark its body done."""
         self.started.add(op.id)
+        # hand this op the idle stretch that accumulated on its patch(es) while it
+        # waited -- those rounds precede the op in the decode stream, and a
+        # segment-batching scheme folds them into the op's decode (Eq. 5's r_i).
+        idle = sum(self.idle_rounds_by_patch.pop(p, 0)
+                   for p in (op.patches if op.patches else op.qubits))
+        prepend = getattr(self.cluster, "prepend_idle_rounds", None)
+        if idle and prepend is not None:
+            prepend(op.id, idle)
         self.device.begin_operation(op)
         kind = "Clifford" if op.clifford else "NON-Clifford"
         gate = "" if op.gated_by is None else f" [released by op#{op.gated_by}]"
@@ -266,6 +278,7 @@ class Chip:
         self.controller.relay_syndrome(
             SyndromePayload(op_id, patch, k),
             lambda p, o=op_id: self.cluster.on_memory_round(o))
+        self.idle_rounds_by_patch[patch] = self.idle_rounds_by_patch.get(patch, 0) + 1
         if self.decode_idle_rounds:
             # every commit-region's worth of idle rounds becomes one memory-window decode
             # job (commit + buffer rounds), sized to this patch's code -- the decoder load
