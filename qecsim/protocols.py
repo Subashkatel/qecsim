@@ -176,7 +176,11 @@ class WorkloadManager(DecoderService, Protocol):
       layout, scheme, rounds_policy   -- read to build the default WindowPlanner; a custom
                                          manager without them must be paired with planner=
       on_workload_complete            -- lifecycle sink the wiring sets (factory shutdown)
-      queue_log                       -- optional [(t, queue_len)] trace for the summary"""
+      queue_log                       -- optional [(t, queue_len)] trace for the summary
+    OPTIONAL extension hook (duck-typed; the chip calls it via getattr):
+      prepend_idle_rounds(op_id, n)   -- the op's patch idled n rounds before it began;
+                                         a segment-batching scheme folds them into the
+                                         op's decode (Eq. 5 of arXiv:2510.25222)"""
     def register_op(self, op: Operation) -> None: ...
     def build_windows(self) -> None: ...
     def load_execution_plan(self, plan: WindowPlan) -> None: ...
