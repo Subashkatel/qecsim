@@ -18,7 +18,7 @@ import pytest
 stim = pytest.importorskip("stim")
 np = pytest.importorskip("numpy")
 
-from qecsim.adapters.window_problems import (build_window_problems,
+from qecsim.adapters.window_error_models import (build_window_error_models,
                                              decode_windowed,
                                              detector_error_model_to_faults,
                                              matching_window_decoder)
@@ -73,10 +73,10 @@ def test_composite_errors_split_into_matchable_components():
 def test_every_fault_is_owned_by_exactly_one_window():
     """The commit partition: each fault decided once, none lost (Skoric's rule)."""
     circuit = _memory_circuit()
-    problems = build_window_problems(circuit, _plan(circuit))
+    models = build_window_error_models(circuit, _plan(circuit))
     det_sets, _, _ = detector_error_model_to_faults(
         circuit.detector_error_model(decompose_errors=True))
-    owned_total = sum(int(p.owned.sum()) for p in problems)
+    owned_total = sum(int(p.owned.sum()) for p in models)
     assert owned_total == len(det_sets)
 
 
@@ -84,8 +84,8 @@ def test_interior_windows_have_open_time_boundaries():
     """A fault straddling a window's edge appears as a single-detector column -- the
     boundary edge Tan's imaginary detectors formalize."""
     circuit = _memory_circuit()
-    problems = build_window_problems(circuit, _plan(circuit))
-    interior = problems[1]
+    models = build_window_error_models(circuit, _plan(circuit))
+    interior = models[1]
     assert (interior.check.sum(axis=0) == 1).any()
 
 
@@ -95,10 +95,10 @@ def test_single_crossing_fault_round_trips_exactly():
     artificial defects, and the windowed pass must reproduce the fault's observable
     flips exactly -- with every handed-forward defect consumed."""
     circuit = _memory_circuit()
-    problems = build_window_problems(circuit, _plan(circuit))
+    models = build_window_error_models(circuit, _plan(circuit))
     det_sets, obs_sets, _ = detector_error_model_to_faults(
         circuit.detector_error_model(decompose_errors=True))
-    w0 = problems[0]
+    w0 = models[0]
     crossing_cols = [c for c in w0.future_flips if w0.owned[c]]
     assert crossing_cols, "no boundary-crossing fault found in window 0"
     decode = matching_window_decoder()
@@ -111,7 +111,7 @@ def test_single_crossing_fault_round_trips_exactly():
         events = np.zeros(n_dets, dtype=np.uint8)
         for d in in_window | beyond:
             events[d] = 1
-        predicted = decode_windowed(problems, events, decode)
+        predicted = decode_windowed(models, events, decode)
         # which fault is this, globally? find it by its full detector set
         full = tuple(sorted(in_window | beyond))
         expected = np.zeros(circuit.num_observables, dtype=np.uint8)
@@ -128,7 +128,7 @@ def test_windowed_accuracy_matches_global_decoding():
     whole history at once. Fixed seed -> deterministic counts."""
     pymatching = pytest.importorskip("pymatching")
     circuit = _memory_circuit(d=3, rounds=12, p=0.003)
-    problems = build_window_problems(circuit, _plan(circuit))
+    models = build_window_error_models(circuit, _plan(circuit))
     shots = 2000
     dets, obs = circuit.compile_detector_sampler(seed=11).sample(
         shots, separate_observables=True)
@@ -136,7 +136,7 @@ def test_windowed_accuracy_matches_global_decoding():
         circuit.detector_error_model(decompose_errors=True))
     global_pred = global_m.decode_batch(dets)
     decode = matching_window_decoder()
-    windowed_pred = np.array([decode_windowed(problems, dets[i], decode)
+    windowed_pred = np.array([decode_windowed(models, dets[i], decode)
                               for i in range(shots)])
     agree = float((windowed_pred == global_pred).all(axis=1).mean())
     ler_global = float((global_pred != obs).any(axis=1).mean())

@@ -24,7 +24,7 @@ from typing import Optional
 
 
 @dataclass(frozen=True)
-class WindowProblem:
+class WindowErrorModel:
     """One window's decoding problem, sliced from the operation's global DEM.
 
     Rows are the window's detectors (sorted by global id, which stim orders by time);
@@ -75,9 +75,9 @@ def detector_error_model_to_faults(dem) -> tuple:
     return det_sets, obs_sets, priors
 
 
-def build_window_problems(circuit, plan: list, num_observables: Optional[int] = None,
+def build_window_error_models(circuit, plan: list, num_observables: Optional[int] = None,
                           ) -> list:
-    """Slice an operation's circuit into one WindowProblem per planned window.
+    """Slice an operation's circuit into one WindowErrorModel per planned window.
 
     `plan` is scheme-style: [(commit_lo, commit_hi, buffer_hi), ...] in 1-based rounds,
     where round r covers the detectors with stim time coordinate t = r - 1. Detectors
@@ -92,7 +92,7 @@ def build_window_problems(circuit, plan: list, num_observables: Optional[int] = 
                 circuit.get_detector_coordinates().items()}
     fault_rounds = [tuple(round_of[d] for d in dets) for dets in det_sets]
 
-    problems: list = []
+    models: list = []
     committed_elsewhere: set = set()               # fault indices owned by past windows
     last = len(plan) - 1
     for k, (commit_lo, commit_hi, buffer_hi) in enumerate(plan):
@@ -126,14 +126,14 @@ def build_window_problems(circuit, plan: list, num_observables: Optional[int] = 
                 beyond = tuple(d for d in det_sets[f] if round_of[d] > commit_hi)
                 if beyond and k != last:
                     future_flips[j] = beyond
-        problems.append(WindowProblem(
+        models.append(WindowErrorModel(
             detector_ids=tuple(rows), commit_hi=commit_hi,
             check=check, priors=np.array([priors[f] for f in cols]),
             obs=obs, owned=owned, future_flips=future_flips))
-    return problems
+    return models
 
 
-def decode_windowed(problems: list, detection_events, decode_window) -> "object":
+def decode_windowed(window_models: list, detection_events, decode_window) -> "object":
     """The committed-window decoding pass over one shot (the offline reference; the
     cluster performs the same steps event-by-event at runtime).
 
@@ -144,18 +144,18 @@ def decode_windowed(problems: list, detection_events, decode_window) -> "object"
     op_results already uses)."""
     import numpy as np
     pending: set = set()                           # artificial defects, by global det id
-    total = np.zeros(problems[0].obs.shape[0], dtype=np.uint8)
-    for prob in problems:
-        syndrome = detection_events[list(prob.detector_ids)].astype(np.uint8).copy()
-        for i, det in enumerate(prob.detector_ids):
+    total = np.zeros(window_models[0].obs.shape[0], dtype=np.uint8)
+    for model in window_models:
+        syndrome = detection_events[list(model.detector_ids)].astype(np.uint8).copy()
+        for i, det in enumerate(model.detector_ids):
             if det in pending:
                 syndrome[i] ^= 1
                 pending.discard(det)
-        selected = np.asarray(decode_window(prob, syndrome), dtype=np.uint8)
-        committed = selected.astype(bool) & prob.owned
-        total ^= (prob.obs @ committed.astype(np.uint8)) % 2
+        selected = np.asarray(decode_window(model, syndrome), dtype=np.uint8)
+        committed = selected.astype(bool) & model.owned
+        total ^= (model.obs @ committed.astype(np.uint8)) % 2
         for col in np.nonzero(committed)[0]:
-            for det in prob.future_flips.get(int(col), ()):
+            for det in model.future_flips.get(int(col), ()):
                 pending.symmetric_difference_update({det})   # defects XOR (mod 2)
     if pending:
         raise RuntimeError(f"artificial defects were never consumed: {sorted(pending)}"
@@ -165,18 +165,18 @@ def decode_windowed(problems: list, detection_events, decode_window) -> "object"
 
 def matching_window_decoder():
     """A PyMatching inner decoder for decode_windowed, caching one Matching per
-    WindowProblem (the matrices are shot-independent). Boundary edges arise from
+    WindowErrorModel (the matrices are shot-independent). Boundary edges arise from
     single-detector columns; weights are the standard log((1-p)/p)."""
     import numpy as np
     import pymatching
     cache: dict = {}
 
-    def decode(prob: WindowProblem, syndrome):
-        m = cache.get(id(prob))
+    def decode(model: WindowErrorModel, syndrome):
+        m = cache.get(id(model))
         if m is None:
-            weights = np.log((1 - prob.priors) / prob.priors)
-            m = pymatching.Matching.from_check_matrix(prob.check, weights=weights)
-            cache[id(prob)] = m
+            weights = np.log((1 - model.priors) / model.priors)
+            m = pymatching.Matching.from_check_matrix(model.check, weights=weights)
+            cache[id(model)] = m
         return m.decode(syndrome)
 
     return decode
