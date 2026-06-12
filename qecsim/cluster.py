@@ -304,6 +304,26 @@ class DecoderCluster:
             for k in range(self.nwin[pred_id]):
                 self._check_window((pred_id, k))
  
+    def prepend_idle_rounds(self, op_id: int, n_rounds: int) -> None:
+        """The op's patch idled `n_rounds` before the op began (waiting for a decode).
+        Under a scheme that batches per feedback-to-feedback SEGMENT (NaiveOnlineScheme,
+        flag batches_idle_rounds_into_next_op), those rounds join the op's FIRST window,
+        so its decode covers idle + op rounds -- the r_i segment of arXiv:2510.25222
+        Eq. 5, the record Terhal's backlog argument requires processed before the next
+        feedback. Continuously-windowed schemes ignore this (their idle decoding
+        overlaps the wait; Phase 2 of docs/DESIGN-idle-stream-windows.md). TIMING-level:
+        the decode job grows by n_rounds; the idle payloads themselves are not retained
+        (they arrive via on_memory_round, which keeps only a count)."""
+        if n_rounds <= 0 or not getattr(self.scheme, "batches_idle_rounds_into_next_op",
+                                        False):
+            return
+        w = self.windows[(op_id, 0)]
+        w.n_rounds += n_rounds
+        self.engine.log("DecoderClstr",
+                        f"{self.ops[op_id].name} W0 absorbs {n_rounds} idle rounds: "
+                        f"its batch decode now covers {w.n_rounds} rounds (the "
+                        f"feedback-to-feedback segment)")
+
     def on_memory_round(self, op_id: int) -> None:
         """An idle/memory round arrived for a waiting patch (fills window buffers)."""
         self.memory_rounds[op_id] += 1
