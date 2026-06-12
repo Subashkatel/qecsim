@@ -125,3 +125,32 @@ def test_idle_absorption_is_inert_for_windowed_schemes():
                       round_us=TAU_GEN_US, decoder=PerRoundDecoder(0.4 * TAU_GEN_US),
                       verbose=False)
     assert not any("absorbs" in l for l in r["engine"].log_lines)
+
+
+def test_round_grid_mode_matches_the_strict_recursion_exactly():
+    """The paper itself says Eq. 5 'strictly speaking ... should be rounded up using
+    the ceiling function' -- the continuous closed form is its own simplification.
+    With gates starting on the round grid (real hardware's clock; SWIPER-SIM models
+    time at round granularity), the simulator must match the STRICT integer recursion
+    with NO tolerance at every gate:
+        seg_{i+1} = (wait_i // tau_gen + 1) + rop,  wait_i = T_comm + tau_dec * seg_i
+    where `// + 1` is the next-boundary rule (a release exactly ON a boundary starts
+    at the following one -- the chip's documented convention; identical to the paper's
+    ceiling everywhere except exact ties). The reference uses the simulator's own tick
+    arithmetic (us()), so the comparison is integers against integers."""
+    g = us(TAU_GEN_US)
+    t_comm = us(0.15) + us(2.0) + us(1.0) + us(4.0) + us(0.15)   # per-link ticks (LinkModel)
+    for f in (0.4, 0.7, 0.9, 1.1):
+        tau_us = f * TAU_GEN_US
+        r = build_and_run(_t_gate_chain(), num_units=1, d=D, rounds_per_op=ROP,
+                          round_us=TAU_GEN_US, scheme=NaiveOnlineScheme(),
+                          decoder=PerRoundDecoder(tau_us), max_idle_rounds=100_000,
+                          gates_start_on_round_boundaries=True, verbose=False)
+        windows = r["cluster"].windows
+        seg = ROP                                     # gate 0 absorbed no idle rounds
+        assert windows[(0, 0)].n_rounds == seg
+        for i in range(1, NGATES):
+            wait = t_comm + us(seg * tau_us)          # the simulator's exact decode+links
+            seg = (wait // g + 1) + ROP               # idle rounds to the boundary + the gate
+            assert windows[(i, 0)].n_rounds == seg, \
+                f"f={f} gate {i}: sim {windows[(i, 0)].n_rounds} != strict {seg}"
