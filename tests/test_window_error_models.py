@@ -7,9 +7,15 @@ Pinned to the sources in docs/DESIGN-real-window-decoding.md:
 - artificial-defect handoff (all three papers, one mechanism): a committed fault's
   beyond-commit flips cancel the defects the next window sees;
 - the certification anchor (Skoric App C): windowed decoding with buffer d matches
-  whole-history decoding accuracy.
+  whole-history decoding accuracy;
+- code-agnosticism: the same slicing serves the bivariate-bicycle [[72,12,6]] code
+  (QUITS validates the construction for qLDPC), with BP-OSD as the inner decoder
+  since BB faults flip up to 6 detectors and matching does not apply. The fixture
+  tests/data/bb72_12_6_p003_r10.stim is a QUITS-built circuit-level memory circuit
+  (BbCode l=6 m=6, A=x^3+y+y^2, B=y^3+x+x^2, p=0.003, 10 noisy rounds, Z basis).
 
-Requires stim + pymatching (skipped where unavailable, like the other adapters)."""
+Requires stim + pymatching (skipped where unavailable, like the other adapters);
+the BB tests additionally require ldpc + scipy."""
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -145,3 +151,92 @@ def test_windowed_accuracy_matches_global_decoding():
     # 'no noticeable increase': allow binomial wiggle on 2000 shots, nothing more
     assert ler_windowed <= ler_global + 2 * (ler_global / shots) ** 0.5 + 0.005, \
         f"windowed LER {ler_windowed} vs global {ler_global}"
+
+
+# ---------------------------------------------------------------------------------
+# Bivariate-bicycle code: the slicing must be code-agnostic, not surface-only.
+# ---------------------------------------------------------------------------------
+
+_BB_FIXTURE = pathlib.Path(__file__).resolve().parent / "data" / \
+    "bb72_12_6_p003_r10.stim"
+_BB_CHECKS_PER_ROUND = 36     # the [[72,12,6]] code's Z checks, one detector layer each
+# commit 3 / buffer 3 sliding plan over the fixture's 12 detector layers
+# (10 noisy rounds + zeroth + final layer), scheme-style 1-based rounds
+_BB_PLAN = [(1, 3, 6), (4, 6, 9), (7, 9, 12), (10, 12, 12)]
+
+
+def _bb_circuit():
+    return stim.Circuit.from_file(str(_BB_FIXTURE))
+
+
+def _bb_models(circuit):
+    """QUITS circuits attach no detector coordinates; detectors are emitted in time
+    order, one layer of 36 per round, so round = id // 36 + 1."""
+    rounds = {d: d // _BB_CHECKS_PER_ROUND + 1 for d in range(circuit.num_detectors)}
+    return build_window_error_models(circuit, _BB_PLAN, decompose_errors=False,
+                                     detector_rounds=rounds)
+
+
+def test_bb_circuit_without_coordinates_requires_explicit_rounds():
+    """Coordinate-less detectors must fail loudly, not be silently mis-binned."""
+    circuit = _bb_circuit()
+    with pytest.raises(ValueError, match="detector_rounds"):
+        build_window_error_models(circuit, _BB_PLAN, decompose_errors=False)
+
+
+def test_bb_faults_are_not_matchable_and_partition_exactly():
+    """The BB DEM is genuinely non-graphlike (faults flip up to 6 detectors), and the
+    ownership partition still holds: every fault committed by exactly one window."""
+    circuit = _bb_circuit()
+    det_sets, _, _ = detector_error_model_to_faults(
+        circuit.detector_error_model(decompose_errors=False))
+    assert max(len(s) for s in det_sets) > 2          # matching would be unsound here
+    models = _bb_models(circuit)
+    assert sum(int(m.owned.sum()) for m in models) == len(det_sets)
+    # interior windows hand artificial defects forward; the last window closes
+    assert all(len(m.future_flips) > 0 for m in models[:-1])
+    assert models[-1].future_flips == {}
+
+
+def test_bb_windowed_accuracy_matches_global_decoding():
+    """The Skoric App C anchor, BB edition: windowed BP-OSD tracks whole-history
+    BP-OSD. Unlike exact matching, BP-OSD is approximate, so windowed and global may
+    legitimately differ on a few shots (QUITS reports the same character); we pin
+    high agreement and LER within binomial wiggle. Fixed seed -> deterministic."""
+    pytest.importorskip("ldpc")
+    sp = pytest.importorskip("scipy.sparse")
+    from ldpc import BpOsdDecoder
+    from qecsim.adapters.window_error_models import bposd_window_decoder
+
+    circuit = _bb_circuit()
+    models = _bb_models(circuit)
+    dem = circuit.detector_error_model(decompose_errors=False)
+    det_sets, obs_sets, priors = detector_error_model_to_faults(dem)
+    H = np.zeros((circuit.num_detectors, len(det_sets)), dtype=np.uint8)
+    O = np.zeros((circuit.num_observables, len(det_sets)), dtype=np.uint8)
+    for j, (ds, os_) in enumerate(zip(det_sets, obs_sets)):
+        for d in ds:
+            H[d, j] = 1
+        for o in os_:
+            O[o, j] = 1
+    global_dec = BpOsdDecoder(sp.csr_matrix(H), error_channel=list(priors),
+                              max_iter=2, bp_method="product_sum",
+                              schedule="serial", osd_method="osd_cs", osd_order=0)
+    shots = 300
+    dets, obs = circuit.compile_detector_sampler(seed=11).sample(
+        shots, separate_observables=True)
+    inner = bposd_window_decoder()
+    agree = ler_w = ler_g = 0
+    for s in range(shots):
+        predicted_w = decode_windowed(models, dets[s], inner)
+        predicted_g = (O @ global_dec.decode(dets[s].astype(np.uint8))) % 2
+        actual = obs[s].astype(np.uint8)
+        agree += int(np.array_equal(predicted_w, predicted_g))
+        ler_w += int(not np.array_equal(predicted_w, actual))
+        ler_g += int(not np.array_equal(predicted_g, actual))
+    agree /= shots
+    ler_w /= shots
+    ler_g /= shots
+    assert agree > 0.9, f"windowed disagrees with global too often: {agree}"
+    assert ler_w <= ler_g + 2 * (ler_g * (1 - ler_g) / shots) ** 0.5 + 0.005, \
+        f"windowed LER {ler_w} vs global {ler_g}"
