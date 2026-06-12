@@ -55,6 +55,11 @@ class WindowErrorModel:
     owned: "object"            # bool (n_cols,): faults THIS window commits
     future_flips: dict         # owned col -> tuple of GLOBAL detector ids it flips
     #                            beyond commit_hi (the artificial defects handed on)
+    defect_positions: dict = None  # global det id -> (round, index within that round's
+    #                            detectors), for every id in future_flips: lets a decoder
+    #                            turn handed-forward defects into the per-round bit masks
+    #                            Window.boundary_in speaks (cluster XORs them into the
+    #                            dependent window's payloads)
 
 
 def detector_error_model_to_faults(dem) -> tuple:
@@ -126,6 +131,11 @@ def build_window_error_models(circuit, plan: list, num_observables: Optional[int
                 "(global detector id -> 1-based round) explicitly")
         round_of = {det: int(c[-1]) + 1 for det, c in coords.items()}
     fault_rounds = [tuple(round_of[d] for d in dets) for dets in det_sets]
+    # position of each detector within its round (ascending id), for defect masks
+    by_round: dict = {}
+    for det in sorted(round_of):
+        by_round.setdefault(round_of[det], []).append(det)
+    pos_of = {det: i for dets in by_round.values() for i, det in enumerate(dets)}
 
     models: list = []
     committed_elsewhere: set = set()               # fault indices owned by past windows
@@ -161,10 +171,13 @@ def build_window_error_models(circuit, plan: list, num_observables: Optional[int
                 beyond = tuple(d for d in det_sets[f] if round_of[d] > commit_hi)
                 if beyond and k != last:
                     future_flips[j] = beyond
+        defect_positions = {det: (round_of[det], pos_of[det])
+                            for flips in future_flips.values() for det in flips}
         models.append(WindowErrorModel(
             detector_ids=tuple(rows), commit_hi=commit_hi,
             check=check, priors=np.array([priors[f] for f in cols]),
-            obs=obs, owned=owned, future_flips=future_flips))
+            obs=obs, owned=owned, future_flips=future_flips,
+            defect_positions=defect_positions))
     return models
 
 
